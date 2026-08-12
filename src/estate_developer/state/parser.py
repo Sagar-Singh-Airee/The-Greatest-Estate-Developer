@@ -1,11 +1,13 @@
+
 """
 Kaggriculture observation parser.
 
 V0 responsibility:
-    Convert the raw Kaggriculture observation into a stable, typed,
+    Convert the raw Kaggriculture observation into a stable,
     strategy-friendly representation.
 
-This module deliberately contains NO strategy.
+This module contains NO strategy.
+
 It only answers:
 
     "What does the environment currently look like?"
@@ -19,7 +21,7 @@ from typing import Any
 
 @dataclass(frozen=True)
 class Position:
-    """Grid position."""
+    """A grid position."""
 
     x: int
     y: int
@@ -32,18 +34,18 @@ class FarmState:
     money: float
     tiles: list[list[Any]]
     farmer: Position
-    hands: list[Position]
+    hands: tuple[Position, ...]
     unlocked_quadrants: tuple[str, ...]
     hires_today: int
 
 
 @dataclass(frozen=True)
 class PrivateState:
-    """Private state visible only to the current agent."""
+    """Private state visible only to the current player."""
 
     shed: dict[str, int]
     seeds: dict[str, int]
-    inventories: list[dict[str, int]]
+    inventories: tuple[dict[str, int], ...]
 
 
 @dataclass(frozen=True)
@@ -63,12 +65,7 @@ class TownState:
 
 @dataclass(frozen=True)
 class ObservationState:
-    """
-    Parsed top-level Kaggriculture state.
-
-    This is the object future systems will consume instead of reading
-    raw obs dictionaries everywhere.
-    """
+    """Complete parsed Kaggriculture observation."""
 
     step: int
     day: int
@@ -83,17 +80,29 @@ class ObservationState:
 
     @property
     def me(self) -> FarmState:
-        """Return our farm."""
+        """Our farm."""
         return self.farms[self.player]
 
     @property
     def opponent(self) -> FarmState:
-        """Return the opponent's public farm."""
+        """Opponent's public farm."""
         return self.farms[1 - self.player]
 
 
 class ObservationParser:
     """Convert raw Kaggriculture observations into ObservationState."""
+
+    REQUIRED_KEYS = {
+        "remainingOverageTime",
+        "step",
+        "player",
+        "farms",
+        "private",
+        "market",
+        "town",
+        "day",
+        "hour",
+    }
 
     @staticmethod
     def _parse_position(value: Any) -> Position:
@@ -109,7 +118,7 @@ class ObservationParser:
     @classmethod
     def _parse_farm(cls, raw: dict[str, Any]) -> FarmState:
         """Parse one public farm."""
-        required_keys = {
+        required = {
             "money",
             "tiles",
             "farmer",
@@ -118,7 +127,8 @@ class ObservationParser:
             "hires_today",
         }
 
-        missing = required_keys - raw.keys()
+        missing = required - raw.keys()
+
         if missing:
             raise ValueError(
                 f"Farm observation missing keys: {sorted(missing)}"
@@ -132,44 +142,70 @@ class ObservationParser:
                 cls._parse_position(position)
                 for position in raw["hands"]
             ),
-            unlocked_quadrants=tuple(raw["unlocked_quadrants"]),
+            unlocked_quadrants=tuple(
+                str(q) for q in raw["unlocked_quadrants"]
+            ),
             hires_today=int(raw["hires_today"]),
         )
 
     @staticmethod
     def _parse_private(raw: dict[str, Any]) -> PrivateState:
         """Parse private player state."""
-        required_keys = {"shed", "seeds", "inventories"}
+        required = {
+            "shed",
+            "seeds",
+            "inventories",
+        }
 
-        missing = required_keys - raw.keys()
+        missing = required - raw.keys()
+
         if missing:
             raise ValueError(
                 f"Private observation missing keys: {sorted(missing)}"
             )
 
         return PrivateState(
-            shed=dict(raw["shed"]),
-            seeds=dict(raw["seeds"]),
-            inventories=[
-                dict(inventory)
+            shed={
+                str(k): int(v)
+                for k, v in raw["shed"].items()
+            },
+            seeds={
+                str(k): int(v)
+                for k, v in raw["seeds"].items()
+            },
+            inventories=tuple(
+                {
+                    str(k): int(v)
+                    for k, v in inventory.items()
+                }
                 for inventory in raw["inventories"]
-            ],
+            ),
         )
 
     @staticmethod
     def _parse_market(raw: dict[str, Any]) -> MarketState:
         """Parse market state."""
-        required_keys = {"inventory", "prices"}
+        required = {
+            "inventory",
+            "prices",
+        }
 
-        missing = required_keys - raw.keys()
+        missing = required - raw.keys()
+
         if missing:
             raise ValueError(
                 f"Market observation missing keys: {sorted(missing)}"
             )
 
         return MarketState(
-            inventory=dict(raw["inventory"]),
-            prices=dict(raw["prices"]),
+            inventory={
+                str(k): int(v)
+                for k, v in raw["inventory"].items()
+            },
+            prices={
+                str(k): int(v)
+                for k, v in raw["prices"].items()
+            },
         )
 
     @staticmethod
@@ -181,7 +217,10 @@ class ObservationParser:
             )
 
         return TownState(
-            unlocked_shops=tuple(raw["unlocked_shops"]),
+            unlocked_shops=tuple(
+                str(shop)
+                for shop in raw["unlocked_shops"]
+            )
         )
 
     @classmethod
@@ -190,21 +229,12 @@ class ObservationParser:
         Parse one raw Kaggriculture observation.
 
         Raises:
-            ValueError: if the observation structure is invalid.
+            ValueError:
+                If the observation structure is invalid.
         """
-        required_keys = {
-            "remainingOverageTime",
-            "step",
-            "player",
-            "farms",
-            "private",
-            "market",
-            "town",
-            "day",
-            "hour",
-        }
 
-        missing = required_keys - obs.keys()
+        missing = cls.REQUIRED_KEYS - obs.keys()
+
         if missing:
             raise ValueError(
                 f"Observation missing keys: {sorted(missing)}"
@@ -214,7 +244,7 @@ class ObservationParser:
 
         if not isinstance(farms, list) or len(farms) != 2:
             raise ValueError(
-                f"Expected exactly two farms, got: {type(farms)!r}"
+                f"Expected exactly two farms, got: {farms!r}"
             )
 
         player = int(obs["player"])
@@ -240,4 +270,3 @@ class ObservationParser:
             market=cls._parse_market(obs["market"]),
             town=cls._parse_town(obs["town"]),
         )
-
