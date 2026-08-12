@@ -2,8 +2,19 @@
 """
 The-Greatest-Estate-Developer.
 
-V1.3.1:
-    Planner-driven three-cell wheat executor.
+V1.4:
+    Global task scheduler with lightweight value awareness.
+
+The architecture remains:
+    observation
+        ↓
+    parser
+        ↓
+    task generation
+        ↓
+    task scoring
+        ↓
+    execution
 """
 
 from __future__ import annotations
@@ -36,35 +47,36 @@ class EstateDeveloperAgent:
 
         state = self.parser.parse(obs)
 
-        # -----------------------------------------------
-        # Generate tasks
-        # -----------------------------------------------
+        # ----------------------------------------------------
+        # Generate all currently available tasks.
+        # ----------------------------------------------------
 
         tasks = self.generator.generate(
             state,
             max_active_wheat=self.MAX_ACTIVE_WHEAT,
         )
 
-        # -----------------------------------------------
-        # Select highest priority task
-        # -----------------------------------------------
+        # ----------------------------------------------------
+        # Select using V1.4 value-aware scoring.
+        # ----------------------------------------------------
 
         selected = self.scheduler.choose(
-            tasks
+            tasks,
+            state,
         )
 
-        # -----------------------------------------------
-        # Farmer operation
-        # -----------------------------------------------
+        # ----------------------------------------------------
+        # Farmer action.
+        # ----------------------------------------------------
 
         farmer_action = self.scheduler.farmer_action(
             selected,
             state,
         )
 
-        # -----------------------------------------------
-        # Market operation
-        # -----------------------------------------------
+        # ----------------------------------------------------
+        # Market actions.
+        # ----------------------------------------------------
 
         market_orders = []
 
@@ -78,20 +90,7 @@ class EstateDeveloperAgent:
                 ]
             )
 
-        elif selected.task_type.value == "PLACE":
-
-            # Selling will happen on a later observation
-            # once the wheat is actually in the shed.
-            pass
-
-        # -----------------------------------------------
-        # Also sell wheat currently in shed.
-        #
-        # This remains safe because selling is independent
-        # of farmer movement and does not create another
-        # farmer task.
-        # -----------------------------------------------
-
+        # Sell wheat once it is actually in the shed.
         shed_wheat = int(
             state.private.shed.get(
                 self.CROP,
