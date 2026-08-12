@@ -1,28 +1,30 @@
 
 """
-V1 Reliable Farmer Executor.
+V1.1 Controlled Two-Cell Wheat Scheduler.
 
-Objective:
-    Complete a controlled wheat production cycle reliably.
+The farmer manages exactly two production cells:
 
-V1 intentionally manages ONE wheat production tile.
+    A = (3, 4)
+    B = (2, 4)
 
-Cycle:
-    buy seed
-        ↓
-    move to production tile
-        ↓
-    plant
-        ↓
-    water
-        ↓
-    maintain until peak
-        ↓
-    harvest
-        ↓
-    return to shed
-        ↓
-    place wheat into shed
+The goal is to increase utilization of the main farmer
+without exceeding a workload that one farmer can reliably
+service.
+
+Priority:
+    1. Critical water
+    2. Harvest ready crop
+    3. Normal water
+    4. Move harvested wheat to shed
+    5. Plant available seed
+    6. PASS
+
+No:
+    - market optimization
+    - fertilizer
+    - animals
+    - land expansion
+    - weed chasing
 """
 
 from __future__ import annotations
@@ -31,15 +33,15 @@ from estate_developer.state.parser import ObservationState
 
 
 class ReliableFarmer:
-    """Reliable single-wheat executor."""
+    """Two-cell wheat task scheduler."""
 
     CROP = "WHEAT"
 
-    # Starting farmer position is (4, 4).
-    # This tile is immediately adjacent.
-    TARGET_TILE = (3, 4)
+    PRODUCTION_TILES = (
+        (3, 4),
+        (2, 4),
+    )
 
-    # One of the documented shed-access positions.
     SHED_TILE = (4, 4)
 
     def decide(
@@ -48,70 +50,86 @@ class ReliableFarmer:
     ) -> list[str]:
 
         farm = state.me
-
         x = farm.farmer.x
         y = farm.farmer.y
 
-        target_x, target_y = self.TARGET_TILE
+        # ----------------------------------------------------
+        # 1. HARVEST READY CROPS
+        # ----------------------------------------------------
 
-        target_tile = self._tile_at(
-            farm.tiles,
-            target_x,
-            target_y,
+        harvest_target = self._best_harvest_target(
+            farm.tiles
         )
 
-        # ====================================================
-        # 1. ACTIVE WHEAT
-        # ====================================================
+        if harvest_target is not None:
 
-        if self._is_wheat(target_tile):
+            tx, ty = harvest_target
 
-            # Water once per day when needed.
-            if not target_tile.get(
-                "watered_today",
-                False,
-            ):
-                if (x, y) != self.TARGET_TILE:
-                    return self._move_toward(
-                        x,
-                        y,
-                        target_x,
-                        target_y,
-                    )
-
-                return ["WATER"]
-
-            # Harvest at the proven peak yield.
-            if self._is_peak_wheat(target_tile):
-
-                if (x, y) != self.TARGET_TILE:
-                    return self._move_toward(
-                        x,
-                        y,
-                        target_x,
-                        target_y,
-                    )
-
-                return ["HARVEST"]
-
-            # Stay close to the production tile.
-            if (x, y) != self.TARGET_TILE:
+            if (x, y) != (tx, ty):
                 return self._move_toward(
                     x,
                     y,
-                    target_x,
-                    target_y,
+                    tx,
+                    ty,
                 )
 
-            return ["PASS"]
+            return ["HARVEST"]
 
-        # ====================================================
-        # 2. HARVESTED WHEAT IN FARMER INVENTORY
-        # ====================================================
+        # ----------------------------------------------------
+        # 2. CRITICAL WATER
+        #
+        # Any unwatered active wheat receives priority.
+        # ----------------------------------------------------
 
-        carried_wheat = self._carried_wheat(state)
+        critical_water = self._best_water_target(
+            farm.tiles,
+            critical_only=True,
+        )
 
-        if carried_wheat > 0:
+        if critical_water is not None:
+
+            tx, ty = critical_water
+
+            if (x, y) != (tx, ty):
+                return self._move_toward(
+                    x,
+                    y,
+                    tx,
+                    ty,
+                )
+
+            return ["WATER"]
+
+        # ----------------------------------------------------
+        # 3. NORMAL WATER
+        # ----------------------------------------------------
+
+        normal_water = self._best_water_target(
+            farm.tiles,
+            critical_only=False,
+        )
+
+        if normal_water is not None:
+
+            tx, ty = normal_water
+
+            if (x, y) != (tx, ty):
+                return self._move_toward(
+                    x,
+                    y,
+                    tx,
+                    ty,
+                )
+
+            return ["WATER"]
+
+        # ----------------------------------------------------
+        # 4. HARVESTED WHEAT → SHED
+        # ----------------------------------------------------
+
+        carried = self._carried_wheat(state)
+
+        if carried > 0:
 
             if (x, y) != self.SHED_TILE:
                 return self._move_toward(
@@ -121,46 +139,190 @@ class ReliableFarmer:
                     self.SHED_TILE[1],
                 )
 
-            # Proven working transfer mechanism.
             return [
                 "PLACE",
                 self.CROP,
-                carried_wheat,
+                carried,
             ]
 
-        # ====================================================
-        # 3. PLANT NEXT SEED
-        # ====================================================
+        # ----------------------------------------------------
+        # 5. PLANT A SEED ON AN AVAILABLE PRODUCTION CELL
+        # ----------------------------------------------------
 
-        seed_count = state.private.seeds.get(
-            self.CROP,
-            0,
+        seeds = int(
+            state.private.seeds.get(
+                self.CROP,
+                0,
+            )
         )
 
-        if seed_count > 0:
+        if seeds > 0:
 
-            if (x, y) != self.TARGET_TILE:
-                return self._move_toward(
-                    x,
-                    y,
-                    target_x,
-                    target_y,
-                )
+            plant_target = self._best_plant_target(
+                farm.tiles
+            )
 
-            if target_tile is None:
+            if plant_target is not None:
+
+                tx, ty = plant_target
+
+                if (x, y) != (tx, ty):
+                    return self._move_toward(
+                        x,
+                        y,
+                        tx,
+                        ty,
+                    )
+
                 return [
                     "PLANT",
                     self.CROP,
                 ]
 
-        # ====================================================
-        # 4. NOTHING TO DO
-        # ====================================================
+        # ----------------------------------------------------
+        # 6. NOTHING URGENT
+        # ----------------------------------------------------
 
         return ["PASS"]
 
     # ========================================================
-    # Helpers
+    # TASK SELECTION
+    # ========================================================
+
+    @classmethod
+    def _best_harvest_target(
+        cls,
+        tiles,
+    ):
+        """
+        Pick the ready production tile with the greatest yield.
+        """
+
+        candidates = []
+
+        for position in cls.PRODUCTION_TILES:
+
+            tile = cls._tile_at(
+                tiles,
+                *position,
+            )
+
+            if not cls._is_wheat(tile):
+                continue
+
+            yield_units = int(
+                tile.get(
+                    "yield_units",
+                    0,
+                )
+            )
+
+            if yield_units <= 0:
+                continue
+
+            # V1.1 harvests once wheat reaches the proven
+            # unfertilized peak yield.
+            if yield_units >= 4:
+                candidates.append(
+                    (
+                        -yield_units,
+                        position,
+                    )
+                )
+
+        if not candidates:
+            return None
+
+        candidates.sort(
+            key=lambda item: item[0]
+        )
+
+        return candidates[0][1]
+
+    @classmethod
+    def _best_water_target(
+        cls,
+        tiles,
+        *,
+        critical_only: bool,
+    ):
+        """
+        Find a wheat cell that has not been watered today.
+
+        For critical_only=True we prioritize crops with the
+        highest consecutive_unwatered value.
+        """
+
+        candidates = []
+
+        for position in cls.PRODUCTION_TILES:
+
+            tile = cls._tile_at(
+                tiles,
+                *position,
+            )
+
+            if not cls._is_wheat(tile):
+                continue
+
+            if tile.get(
+                "watered_today",
+                False,
+            ):
+                continue
+
+            unwatered = int(
+                tile.get(
+                    "consecutive_unwatered",
+                    0,
+                )
+            )
+
+            if critical_only and unwatered < 1:
+                continue
+
+            # Higher risk first.
+            candidates.append(
+                (
+                    -unwatered,
+                    position,
+                )
+            )
+
+        if not candidates:
+            return None
+
+        candidates.sort(
+            key=lambda item: (
+                item[0],
+                item[1][1],
+                item[1][0],
+            )
+        )
+
+        return candidates[0][1]
+
+    @classmethod
+    def _best_plant_target(
+        cls,
+        tiles,
+    ):
+        """Return the first empty controlled production cell."""
+
+        for position in cls.PRODUCTION_TILES:
+
+            tile = cls._tile_at(
+                tiles,
+                *position,
+            )
+
+            if tile is None:
+                return position
+
+        return None
+
+    # ========================================================
+    # STATE HELPERS
     # ========================================================
 
     @staticmethod
@@ -185,21 +347,6 @@ class ReliableFarmer:
             and tile.get("crop") == "WHEAT"
         )
 
-    @classmethod
-    def _is_peak_wheat(cls, tile) -> bool:
-        """
-        Harvest once wheat reaches the proven
-        unfertilized peak yield of 4.
-        """
-
-        if not cls._is_wheat(tile):
-            return False
-
-        return tile.get(
-            "yield_units",
-            0,
-        ) >= 4
-
     @staticmethod
     def _carried_wheat(
         state: ObservationState,
@@ -214,6 +361,10 @@ class ReliableFarmer:
                 0,
             )
         )
+
+    # ========================================================
+    # MOVEMENT
+    # ========================================================
 
     @staticmethod
     def _move_toward(

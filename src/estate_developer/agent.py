@@ -2,13 +2,11 @@
 """
 The-Greatest-Estate-Developer.
 
-V1 Reliable Executor.
+V1.1:
+    Controlled two-cell wheat production.
 
-Strategy:
-    Maintain exactly one controlled wheat production cycle.
-
-This is the execution foundation.
-No advanced market/investment/opponent strategy yet.
+Hard production limit:
+    2 active wheat plants.
 """
 
 from __future__ import annotations
@@ -20,21 +18,21 @@ from estate_developer.actions.farmer import ReliableFarmer
 
 
 class EstateDeveloperAgent:
-    """V1 reliable single-wheat agent."""
+    """V1.1 two-cell wheat agent."""
 
     CROP = "WHEAT"
     SEED_COST = 10
+    MAX_ACTIVE_WHEAT = 2
 
     def __init__(self) -> None:
         self.parser = ObservationParser()
         self.farmer = ReliableFarmer()
 
-    # ========================================================
-    # State helpers
-    # ========================================================
-
     @classmethod
-    def active_wheat_count(cls, state) -> int:
+    def active_wheat_count(
+        cls,
+        state,
+    ) -> int:
 
         count = 0
 
@@ -51,7 +49,10 @@ class EstateDeveloperAgent:
         return count
 
     @classmethod
-    def carried_wheat(cls, state) -> int:
+    def carried_wheat(
+        cls,
+        state,
+    ) -> int:
 
         if not state.private.inventories:
             return 0
@@ -64,7 +65,10 @@ class EstateDeveloperAgent:
         )
 
     @classmethod
-    def shed_wheat(cls, state) -> int:
+    def shed_wheat(
+        cls,
+        state,
+    ) -> int:
 
         return int(
             state.private.shed.get(
@@ -73,10 +77,6 @@ class EstateDeveloperAgent:
             )
         )
 
-    # ========================================================
-    # Main decision
-    # ========================================================
-
     def step(
         self,
         obs: dict[str, Any],
@@ -84,7 +84,9 @@ class EstateDeveloperAgent:
 
         state = self.parser.parse(obs)
 
-        farmer_action = self.farmer.decide(state)
+        farmer_action = self.farmer.decide(
+            state
+        )
 
         active_wheat = self.active_wheat_count(
             state
@@ -98,7 +100,7 @@ class EstateDeveloperAgent:
             state
         )
 
-        seed_count = int(
+        seeds = int(
             state.private.seeds.get(
                 self.CROP,
                 0,
@@ -108,10 +110,11 @@ class EstateDeveloperAgent:
         market_orders = []
 
         # ----------------------------------------------------
-        # Sell wheat already stored in shed.
+        # SELL HARVESTED WHEAT
         # ----------------------------------------------------
 
         if shed_wheat > 0:
+
             market_orders.append(
                 [
                     "SELL",
@@ -121,17 +124,22 @@ class EstateDeveloperAgent:
             )
 
         # ----------------------------------------------------
-        # Buy exactly one seed only when the whole cycle
-        # is finished.
+        # BUY A SEED IF:
+        #
+        #   - we have room for another production cell
+        #   - no seed is already available
+        #   - no wheat is currently being transported
+        #
+        # This allows controlled overlap between two crops.
         # ----------------------------------------------------
 
         if (
-            active_wheat == 0
+            active_wheat < self.MAX_ACTIVE_WHEAT
+            and seeds == 0
             and carried_wheat == 0
-            and shed_wheat == 0
-            and seed_count == 0
             and state.me.money >= self.SEED_COST
         ):
+
             market_orders.append(
                 [
                     "BUY_SEED",
@@ -153,6 +161,6 @@ _agent = EstateDeveloperAgent()
 def agent(
     obs: dict[str, Any],
 ) -> dict[str, Any]:
-    """Kaggriculture submission entry point."""
+    """Kaggriculture entry point."""
 
     return _agent.step(obs)
