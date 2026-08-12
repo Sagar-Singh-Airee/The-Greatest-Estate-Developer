@@ -36,12 +36,14 @@ class TaskGenerator:
     # Fixed execution capacity discovered empirically.
     # --------------------------------------------------------
 
-    MAX_PRODUCTION_SLOTS = 3
+    MAX_PRODUCTION_SLOTS = 5
 
     PRODUCTION_TILES = (
         (3, 4),
         (2, 4),
         (3, 3),
+        (2, 3),
+        (1, 3),
     )
 
     # Economic candidates currently validated.
@@ -80,7 +82,7 @@ class TaskGenerator:
         crop-specific limit.
 
         The actual constraint is:
-            MAX_PRODUCTION_SLOTS = 3
+            MAX_PRODUCTION_SLOTS = 5
         """
 
         tasks: list[FarmTask] = []
@@ -462,15 +464,13 @@ class TaskGenerator:
 
         return tiles[y][x]
 
-    @classmethod
     def _find_empty_production_tile(
-        cls,
+        self,
         tiles,
     ):
+        for x, y in self.PRODUCTION_TILES:
 
-        for x, y in cls.PRODUCTION_TILES:
-
-            tile = cls._tile_at(
+            tile = self._tile_at(
                 tiles,
                 x,
                 y,

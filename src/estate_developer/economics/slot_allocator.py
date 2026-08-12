@@ -80,7 +80,15 @@ class ProductionSlotAllocator:
     # Three-slot capacity discovered empirically.
     # --------------------------------------------------------
 
-    MAX_PRODUCTION_SLOTS = 3
+    MAX_PRODUCTION_SLOTS = 5
+
+    PRODUCTION_TILES = (
+        (3, 4),
+        (2, 4),
+        (3, 3),
+        (2, 3),
+        (1, 3),
+    )
 
     # --------------------------------------------------------
     # Current validated one-time candidates.
@@ -109,20 +117,12 @@ class ProductionSlotAllocator:
         state,
     ) -> int:
         """
-        Count currently active one-time production crops
-        in the controlled production area.
+        Count currently active one-time production crops.
         """
 
         count = 0
 
-        # Current production area from V1.4.
-        positions = (
-            (3, 4),
-            (2, 4),
-            (3, 3),
-        )
-
-        for x, y in positions:
+        for x, y in self.PRODUCTION_TILES:
 
             tile = self._tile_at(
                 state.me.tiles,
@@ -142,6 +142,9 @@ class ProductionSlotAllocator:
         self,
         state,
     ) -> int:
+        """
+        Return the number of free production slots.
+        """
 
         active = self.count_active_slots(
             state
@@ -151,10 +154,6 @@ class ProductionSlotAllocator:
             0,
             self.MAX_PRODUCTION_SLOTS - active,
         )
-
-    # ========================================================
-    # CANDIDATE EVALUATION
-    # ========================================================
 
     def evaluate(
         self,
