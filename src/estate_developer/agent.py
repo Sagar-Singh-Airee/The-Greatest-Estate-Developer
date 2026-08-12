@@ -2,80 +2,51 @@
 """
 The-Greatest-Estate-Developer.
 
-V1 Reliable Executor.
+V2.12 Dynamic Economic Production Agent.
 
-Strategy:
-    Maintain exactly one controlled wheat production cycle.
+V2 chooses:
+    what should occupy a free production slot?
 
-This is the execution foundation.
-No advanced market/investment/opponent strategy yet.
+V1.4 scheduler/executor still determines:
+    how should the farmer execute it?
+
+Existing healthy crops are never replaced.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-from estate_developer.state.parser import ObservationParser
-from estate_developer.actions.farmer import ReliableFarmer
+from estate_developer.state.parser import (
+    ObservationParser,
+)
+
+from estate_developer.planning.generator import (
+    TaskGenerator,
+)
+
+from estate_developer.planning.scheduler import (
+    TaskScheduler,
+)
 
 
 class EstateDeveloperAgent:
-    """V1 reliable single-wheat agent."""
 
-    CROP = "WHEAT"
-    SEED_COST = 10
+    MAX_PRODUCTION_SLOTS = 3
 
-    def __init__(self) -> None:
+    CANDIDATE_CROPS = (
+        "WHEAT",
+        "CARROT",
+        "MELON",
+    )
+
+    def __init__(self):
+
         self.parser = ObservationParser()
-        self.farmer = ReliableFarmer()
 
-    # ========================================================
-    # State helpers
-    # ========================================================
+        self.generator = TaskGenerator()
 
-    @classmethod
-    def active_wheat_count(cls, state) -> int:
-
-        count = 0
-
-        for row in state.me.tiles:
-            for tile in row:
-
-                if (
-                    isinstance(tile, dict)
-                    and tile.get("kind") == "PLANT"
-                    and tile.get("crop") == cls.CROP
-                ):
-                    count += 1
-
-        return count
-
-    @classmethod
-    def carried_wheat(cls, state) -> int:
-
-        if not state.private.inventories:
-            return 0
-
-        return int(
-            state.private.inventories[0].get(
-                cls.CROP,
-                0,
-            )
-        )
-
-    @classmethod
-    def shed_wheat(cls, state) -> int:
-
-        return int(
-            state.private.shed.get(
-                cls.CROP,
-                0,
-            )
-        )
-
-    # ========================================================
-    # Main decision
-    # ========================================================
+        self.scheduler = TaskScheduler()
 
     def step(
         self,
@@ -84,66 +55,87 @@ class EstateDeveloperAgent:
 
         state = self.parser.parse(obs)
 
-        farmer_action = self.farmer.decide(state)
+        # ----------------------------------------------------
+        # Generate dynamic tasks.
+        # ----------------------------------------------------
 
-        active_wheat = self.active_wheat_count(
-            state
+        tasks = self.generator.generate(
+            state,
+            max_active_wheat=self.MAX_PRODUCTION_SLOTS,
         )
 
-        carried_wheat = self.carried_wheat(
-            state
+        # ----------------------------------------------------
+        # Select highest-value executable task.
+        # ----------------------------------------------------
+
+        selected = self.scheduler.choose(
+            tasks,
+            state,
         )
 
-        shed_wheat = self.shed_wheat(
-            state
+        # ----------------------------------------------------
+        # Farmer action.
+        # ----------------------------------------------------
+
+        farmer_action = self.scheduler.farmer_action(
+            selected,
+            state,
         )
 
-        seed_count = int(
-            state.private.seeds.get(
-                self.CROP,
-                0,
-            )
-        )
+        # ----------------------------------------------------
+        # Market orders.
+        # ----------------------------------------------------
 
         market_orders = []
 
         # ----------------------------------------------------
-        # Sell wheat already stored in shed.
+        # Economic seed purchase.
         # ----------------------------------------------------
 
-        if shed_wheat > 0:
-            market_orders.append(
-                [
-                    "SELL",
-                    self.CROP,
-                    shed_wheat,
-                ]
+        if selected.task_type.value == "BUY_SEED":
+
+            if selected.crop is not None:
+
+                market_orders.append(
+                    [
+                        "BUY_SEED",
+                        selected.crop,
+                        max(
+                            1,
+                            selected.quantity,
+                        ),
+                    ]
+                )
+
+        # ----------------------------------------------------
+        # Sell completed inventory already in shed.
+        #
+        # Selling happens separately from the farmer action.
+        # ----------------------------------------------------
+
+        for crop in self.CANDIDATE_CROPS:
+
+            quantity = int(
+                state.private.shed.get(
+                    crop,
+                    0,
+                )
             )
 
-        # ----------------------------------------------------
-        # Buy exactly one seed only when the whole cycle
-        # is finished.
-        # ----------------------------------------------------
+            if quantity > 0:
 
-        if (
-            active_wheat == 0
-            and carried_wheat == 0
-            and shed_wheat == 0
-            and seed_count == 0
-            and state.me.money >= self.SEED_COST
-        ):
-            market_orders.append(
-                [
-                    "BUY_SEED",
-                    self.CROP,
-                    1,
-                ]
-            )
+                market_orders.append(
+                    [
+                        "SELL",
+                        crop,
+                        quantity,
+                    ]
+                )
 
         return {
             "farmer": farmer_action,
             "hands": [],
-            "market": market_orders,
+            "market": market_orders[:10],
         }
 
 
@@ -153,6 +145,5 @@ _agent = EstateDeveloperAgent()
 def agent(
     obs: dict[str, Any],
 ) -> dict[str, Any]:
-    """Kaggriculture submission entry point."""
 
     return _agent.step(obs)

@@ -1,11 +1,28 @@
 
 """
-V1.3.1 Global Task Generator.
+V2.12 Dynamic Economic Task Generator.
 
-All immediate executable decisions originate here.
+Responsibilities:
+
+    1. Discover work on the real farm.
+    2. Protect existing crops.
+    3. Detect free production slots.
+    4. Ask the economic allocator which crop should occupy
+       the next free slot.
+    5. Generate BUY_SEED / PLANT tasks.
+
+Important rule:
+
+    Existing healthy crops are NEVER replaced.
+
+Only empty production slots are economically allocated.
 """
 
 from __future__ import annotations
+
+from estate_developer.economics.slot_allocator import (
+    ProductionSlotAllocator,
+)
 
 from estate_developer.planning.tasks import (
     FarmTask,
@@ -15,17 +32,39 @@ from estate_developer.planning.tasks import (
 
 class TaskGenerator:
 
+    # --------------------------------------------------------
+    # Fixed execution capacity discovered empirically.
+    # --------------------------------------------------------
+
+    MAX_PRODUCTION_SLOTS = 3
+
+    PRODUCTION_TILES = (
+        (3, 4),
+        (2, 4),
+        (3, 3),
+    )
+
+    # Economic candidates currently validated.
+    CANDIDATE_CROPS = (
+        "WHEAT",
+        "CARROT",
+        "MELON",
+    )
+
+    # Task priorities.
+    HARVEST_PRIORITY = 1000
+    WATER_CRITICAL_PRIORITY = 900
+    WATER_NORMAL_PRIORITY = 800
+    PLACE_PRIORITY = 700
+    PLANT_PRIORITY = 600
     BUY_SEED_PRIORITY = 500
 
-    PLANT_PRIORITY = 600
-    PLACE_PRIORITY = 700
-    WATER_NORMAL_PRIORITY = 800
-    WATER_CRITICAL_PRIORITY = 900
-    HARVEST_PRIORITY = 1000
+    def __init__(self) -> None:
+        self.allocator = ProductionSlotAllocator()
 
-    CROP = "WHEAT"
-
-    SEED_COST = 10
+    # ========================================================
+    # MAIN GENERATION
+    # ========================================================
 
     def generate(
         self,
@@ -33,198 +72,254 @@ class TaskGenerator:
         *,
         max_active_wheat: int = 3,
     ) -> list[FarmTask]:
+        """
+        Generate all currently actionable tasks.
 
-        tasks = []
+        `max_active_wheat` is retained for compatibility with
+        the V1.4 agent interface but is no longer used as a
+        crop-specific limit.
 
-        active_wheat = 0
+        The actual constraint is:
+            MAX_PRODUCTION_SLOTS = 3
+        """
+
+        tasks: list[FarmTask] = []
+
+        active_slots = 0
 
         # ----------------------------------------------------
-        # Scan farm
+        # 1. Scan the controlled production area.
         # ----------------------------------------------------
 
-        for y, row in enumerate(state.me.tiles):
+        for x, y in self.PRODUCTION_TILES:
 
-            for x, tile in enumerate(row):
+            tile = self._tile_at(
+                state.me.tiles,
+                x,
+                y,
+            )
 
-                if not isinstance(tile, dict):
-                    continue
+            if tile == "LOCKED":
+                continue
 
-                if (
-                    tile.get("kind") == "PLANT"
-                    and tile.get("crop") == self.CROP
-                ):
+            # Empty slot.
+            if tile is None:
+                continue
 
-                    active_wheat += 1
+            # Only actual plant objects count as occupied
+            # production slots.
+            if not isinstance(tile, dict):
+                continue
 
-                    yield_units = int(
-                        tile.get(
-                            "yield_units",
-                            0,
-                        )
+            if tile.get("kind") != "PLANT":
+                continue
+
+            crop = tile.get("crop")
+
+            if crop not in self.CANDIDATE_CROPS:
+                continue
+
+            active_slots += 1
+
+            # ------------------------------------------------
+            # HARVEST
+            # ------------------------------------------------
+
+            if self._is_harvest_ready(
+                tile,
+                crop,
+            ):
+
+                tasks.append(
+                    FarmTask(
+                        task_type=TaskType.HARVEST,
+                        priority=self.HARVEST_PRIORITY,
+                        target=(x, y),
+                        crop=crop,
+                        reason=(
+                            f"{crop.lower()} reached "
+                            "peak batch yield"
+                        ),
+                    )
+                )
+
+                # Harvest is more important than routine water.
+                continue
+
+            # ------------------------------------------------
+            # WATER
+            # ------------------------------------------------
+
+            if not tile.get(
+                "watered_today",
+                False,
+            ):
+
+                unwatered = int(
+                    tile.get(
+                        "consecutive_unwatered",
+                        0,
+                    )
+                )
+
+                if unwatered >= 1:
+
+                    priority = (
+                        self.WATER_CRITICAL_PRIORITY
                     )
 
-                    # ----------------------------------------
-                    # HARVEST
-                    # ----------------------------------------
+                    reason = (
+                        f"{crop.lower()} is approaching "
+                        "watering failure"
+                    )
 
-                    if yield_units >= 4:
+                else:
 
-                        tasks.append(
-                            FarmTask(
-                                task_type=TaskType.HARVEST,
-                                priority=self.HARVEST_PRIORITY,
-                                target=(x, y),
-                                crop=self.CROP,
-                                reason="wheat at peak yield",
-                            )
-                        )
+                    priority = (
+                        self.WATER_NORMAL_PRIORITY
+                    )
 
-                        continue
+                    reason = (
+                        f"{crop.lower()} requires "
+                        "daily watering"
+                    )
 
-                    # ----------------------------------------
-                    # WATER
-                    # ----------------------------------------
-
-                    if not tile.get(
-                        "watered_today",
-                        False,
-                    ):
-
-                        unwatered = int(
-                            tile.get(
-                                "consecutive_unwatered",
-                                0,
-                            )
-                        )
-
-                        if unwatered >= 1:
-
-                            priority = (
-                                self.WATER_CRITICAL_PRIORITY
-                            )
-
-                            reason = (
-                                "wheat nearing "
-                                "watering failure"
-                            )
-
-                        else:
-
-                            priority = (
-                                self.WATER_NORMAL_PRIORITY
-                            )
-
-                            reason = (
-                                "wheat requires "
-                                "daily watering"
-                            )
-
-                        tasks.append(
-                            FarmTask(
-                                task_type=TaskType.WATER,
-                                priority=priority,
-                                target=(x, y),
-                                crop=self.CROP,
-                                reason=reason,
-                            )
-                        )
+                tasks.append(
+                    FarmTask(
+                        task_type=TaskType.WATER,
+                        priority=priority,
+                        target=(x, y),
+                        crop=crop,
+                        reason=reason,
+                    )
+                )
 
         # ----------------------------------------------------
-        # PLACE harvested wheat
+        # 2. Harvested inventory → shed.
         # ----------------------------------------------------
 
-        carried = 0
+        inventory = (
+            state.private.inventories[0]
+            if state.private.inventories
+            else {}
+        )
 
-        if state.private.inventories:
+        for crop in self.CANDIDATE_CROPS:
 
-            carried = int(
-                state.private.inventories[0].get(
-                    self.CROP,
+            quantity = int(
+                inventory.get(
+                    crop,
                     0,
                 )
             )
 
-        if carried > 0:
-
-            tasks.append(
-                FarmTask(
-                    task_type=TaskType.PLACE,
-                    priority=self.PLACE_PRIORITY,
-                    crop=self.CROP,
-                    quantity=carried,
-                    reason="transfer harvested wheat to shed",
-                )
-            )
-
-        # ----------------------------------------------------
-        # BUY SEED
-        #
-        # This is now part of the planning system.
-        # ----------------------------------------------------
-
-        seeds = int(
-            state.private.seeds.get(
-                self.CROP,
-                0,
-            )
-        )
-
-        shed = int(
-            state.private.shed.get(
-                self.CROP,
-                0,
-            )
-        )
-
-        if (
-            active_wheat < max_active_wheat
-            and seeds == 0
-            and carried == 0
-            and shed == 0
-            and state.me.money >= self.SEED_COST
-        ):
-
-            tasks.append(
-                FarmTask(
-                    task_type=TaskType.BUY_SEED,
-                    priority=self.BUY_SEED_PRIORITY,
-                    crop=self.CROP,
-                    quantity=1,
-                    reason=(
-                        "production capacity available "
-                        "and no wheat seed held"
-                    ),
-                )
-            )
-
-        # ----------------------------------------------------
-        # PLANT
-        # ----------------------------------------------------
-
-        if (
-            seeds > 0
-            and active_wheat < max_active_wheat
-        ):
-
-            target = self._find_empty_tile(
-                state.me.tiles
-            )
-
-            if target is not None:
+            if quantity > 0:
 
                 tasks.append(
                     FarmTask(
-                        task_type=TaskType.PLANT,
-                        priority=self.PLANT_PRIORITY,
-                        target=target,
-                        crop=self.CROP,
-                        quantity=1,
-                        reason="unused production capacity",
+                        task_type=TaskType.PLACE,
+                        priority=self.PLACE_PRIORITY,
+                        crop=crop,
+                        quantity=quantity,
+                        reason=(
+                            f"move harvested "
+                            f"{crop.lower()} to shed"
+                        ),
                     )
                 )
 
+                # One farmer inventory can normally contain
+                # the current harvested batch. We still break
+                # after adding the first discovered transfer.
+                break
+
         # ----------------------------------------------------
-        # FALLBACK
+        # 3. Economic allocation of a FREE slot.
+        # ----------------------------------------------------
+
+        if active_slots < self.MAX_PRODUCTION_SLOTS:
+
+            candidate = self._best_feasible_crop(
+                state
+            )
+
+            if candidate is not None:
+
+                crop = candidate.crop
+
+                seed_count = int(
+                    state.private.seeds.get(
+                        crop,
+                        0,
+                    )
+                )
+
+                # --------------------------------------------
+                # Plant immediately if the correct seed exists.
+                # --------------------------------------------
+
+                if seed_count > 0:
+
+                    target = (
+                        self._find_empty_production_tile(
+                            state.me.tiles
+                        )
+                    )
+
+                    if target is not None:
+
+                        tasks.append(
+                            FarmTask(
+                                task_type=TaskType.PLANT,
+                                priority=self.PLANT_PRIORITY,
+                                target=target,
+                                crop=crop,
+                                quantity=1,
+                                reason=(
+                                    "economic allocator selected "
+                                    f"{crop}"
+                                ),
+                            )
+                        )
+
+                # --------------------------------------------
+                # Otherwise buy exactly one seed.
+                # --------------------------------------------
+
+                else:
+
+                    # Never buy if carrying goods or if a crop
+                    # is still waiting in the shed.
+                    if not self._farmer_carrying_any_candidate(
+                        state
+                    ) and not self._shed_contains_candidate(
+                        state
+                    ):
+
+                        profile = self._profile(
+                            crop
+                        )
+
+                        if (
+                            state.me.money
+                            >= profile.seed_cost
+                        ):
+
+                            tasks.append(
+                                FarmTask(
+                                    task_type=TaskType.BUY_SEED,
+                                    priority=self.BUY_SEED_PRIORITY,
+                                    crop=crop,
+                                    quantity=1,
+                                    reason=(
+                                        "economic allocator "
+                                        f"selected {crop}"
+                                    ),
+                                )
+                            )
+
+        # ----------------------------------------------------
+        # 4. Fallback
         # ----------------------------------------------------
 
         if not tasks:
@@ -244,22 +339,144 @@ class TaskGenerator:
 
         return tasks
 
-    @staticmethod
-    def _find_empty_tile(tiles):
+    # ========================================================
+    # ECONOMIC SELECTION
+    # ========================================================
 
-        preferred = (
-            (3, 4),
-            (2, 4),
-            (3, 3),
+    def _best_feasible_crop(
+        self,
+        state,
+    ):
+        """Return best currently feasible economic crop."""
+
+        ranked = self.allocator.rank(
+            state
         )
 
-        for x, y in preferred:
+        for candidate in ranked:
 
-            if (
-                0 <= y < len(tiles)
-                and 0 <= x < len(tiles[y])
-                and tiles[y][x] is None
-            ):
+            if candidate.crop in self.CANDIDATE_CROPS:
+                return candidate
+
+        return None
+
+    # ========================================================
+    # CROP PROFILE
+    # ========================================================
+
+    @staticmethod
+    def _profile(crop: str):
+        from estate_developer.economics.crops import (
+            CROP_PROFILES,
+        )
+
+        return CROP_PROFILES[crop]
+
+    # ========================================================
+    # HARVEST LOGIC
+    # ========================================================
+
+    @classmethod
+    def _is_harvest_ready(
+        cls,
+        tile: dict,
+        crop: str,
+    ) -> bool:
+
+        from estate_developer.economics.crops import (
+            CROP_PROFILES,
+        )
+
+        profile = CROP_PROFILES[crop]
+
+        yield_units = int(
+            tile.get(
+                "yield_units",
+                0,
+            )
+        )
+
+        # For current V2 candidates this represents peak
+        # one-time batch yield.
+        return (
+            yield_units
+            >= profile.max_yield_unfertilized
+        )
+
+    # ========================================================
+    # INVENTORY
+    # ========================================================
+
+    def _farmer_carrying_any_candidate(
+        self,
+        state,
+    ) -> bool:
+
+        inventory = (
+            state.private.inventories[0]
+            if state.private.inventories
+            else {}
+        )
+
+        return any(
+            int(
+                inventory.get(
+                    crop,
+                    0,
+                )
+            ) > 0
+            for crop in self.CANDIDATE_CROPS
+        )
+
+    def _shed_contains_candidate(
+        self,
+        state,
+    ) -> bool:
+
+        return any(
+            int(
+                state.private.shed.get(
+                    crop,
+                    0,
+                )
+            ) > 0
+            for crop in self.CANDIDATE_CROPS
+        )
+
+    # ========================================================
+    # BOARD HELPERS
+    # ========================================================
+
+    @staticmethod
+    def _tile_at(
+        tiles,
+        x: int,
+        y: int,
+    ):
+
+        if y < 0 or y >= len(tiles):
+            return None
+
+        if x < 0 or x >= len(tiles[y]):
+            return None
+
+        return tiles[y][x]
+
+    @classmethod
+    def _find_empty_production_tile(
+        cls,
+        tiles,
+    ):
+
+        for x, y in cls.PRODUCTION_TILES:
+
+            tile = cls._tile_at(
+                tiles,
+                x,
+                y,
+            )
+
+            if tile is None:
                 return (x, y)
 
         return None
