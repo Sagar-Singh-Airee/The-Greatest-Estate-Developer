@@ -100,6 +100,10 @@ class ProductionSlotAllocator:
 
     SEASON_DAYS = 30
 
+    # Minimum number of days reserved for execution
+    # overhead after the theoretical crop completion date.
+    SEASON_BUFFER_DAYS = 0
+
     def count_active_slots(
         self,
         state,
@@ -188,17 +192,20 @@ class ProductionSlotAllocator:
             state.day
         )
 
+        theoretical_finish_day = (
+            current_day
+            + production_days
+        )
+
         remaining_days_after_harvest = (
             self.SEASON_DAYS
-            - (
-                current_day
-                + production_days
-            )
+            - theoretical_finish_day
         )
 
         season_feasible = (
-            remaining_days_after_harvest
-            >= 0
+            theoretical_finish_day
+            + self.SEASON_BUFFER_DAYS
+            <= self.SEASON_DAYS
         )
 
         contribution = (
