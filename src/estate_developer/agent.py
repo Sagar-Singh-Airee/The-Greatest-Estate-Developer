@@ -2,11 +2,8 @@
 """
 The-Greatest-Estate-Developer.
 
-V1.1:
-    Controlled two-cell wheat production.
-
-Hard production limit:
-    2 active wheat plants.
+V1.2:
+    Controlled three-cell wheat production.
 """
 
 from __future__ import annotations
@@ -18,21 +15,20 @@ from estate_developer.actions.farmer import ReliableFarmer
 
 
 class EstateDeveloperAgent:
-    """V1.1 two-cell wheat agent."""
+    """V1.2 three-cell wheat agent."""
 
     CROP = "WHEAT"
+
     SEED_COST = 10
-    MAX_ACTIVE_WHEAT = 2
+
+    MAX_ACTIVE_WHEAT = 3
 
     def __init__(self) -> None:
         self.parser = ObservationParser()
         self.farmer = ReliableFarmer()
 
     @classmethod
-    def active_wheat_count(
-        cls,
-        state,
-    ) -> int:
+    def active_wheat_count(cls, state) -> int:
 
         count = 0
 
@@ -49,10 +45,7 @@ class EstateDeveloperAgent:
         return count
 
     @classmethod
-    def carried_wheat(
-        cls,
-        state,
-    ) -> int:
+    def carried_wheat(cls, state) -> int:
 
         if not state.private.inventories:
             return 0
@@ -65,10 +58,7 @@ class EstateDeveloperAgent:
         )
 
     @classmethod
-    def shed_wheat(
-        cls,
-        state,
-    ) -> int:
+    def shed_wheat(cls, state) -> int:
 
         return int(
             state.private.shed.get(
@@ -100,7 +90,7 @@ class EstateDeveloperAgent:
             state
         )
 
-        seeds = int(
+        seed_count = int(
             state.private.seeds.get(
                 self.CROP,
                 0,
@@ -110,11 +100,10 @@ class EstateDeveloperAgent:
         market_orders = []
 
         # ----------------------------------------------------
-        # SELL HARVESTED WHEAT
+        # SELL EVERYTHING CURRENTLY IN SHED
         # ----------------------------------------------------
 
         if shed_wheat > 0:
-
             market_orders.append(
                 [
                     "SELL",
@@ -124,22 +113,15 @@ class EstateDeveloperAgent:
             )
 
         # ----------------------------------------------------
-        # BUY A SEED IF:
-        #
-        #   - we have room for another production cell
-        #   - no seed is already available
-        #   - no wheat is currently being transported
-        #
-        # This allows controlled overlap between two crops.
+        # BUY SEED ONLY IF THERE IS PRODUCTION CAPACITY
         # ----------------------------------------------------
 
         if (
             active_wheat < self.MAX_ACTIVE_WHEAT
-            and seeds == 0
+            and seed_count == 0
             and carried_wheat == 0
             and state.me.money >= self.SEED_COST
         ):
-
             market_orders.append(
                 [
                     "BUY_SEED",

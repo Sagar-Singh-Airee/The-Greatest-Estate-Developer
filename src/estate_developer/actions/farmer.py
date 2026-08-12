@@ -1,23 +1,14 @@
 
 """
-V1.1 Controlled Two-Cell Wheat Scheduler.
+V1.2 Controlled Three-Cell Wheat Scheduler.
 
-The farmer manages exactly two production cells:
-
+Production cells:
     A = (3, 4)
     B = (2, 4)
+    C = (3, 3)
 
-The goal is to increase utilization of the main farmer
-without exceeding a workload that one farmer can reliably
-service.
-
-Priority:
-    1. Critical water
-    2. Harvest ready crop
-    3. Normal water
-    4. Move harvested wheat to shed
-    5. Plant available seed
-    6. PASS
+Hard production limit:
+    3 active wheat plants.
 
 No:
     - market optimization
@@ -33,13 +24,14 @@ from estate_developer.state.parser import ObservationState
 
 
 class ReliableFarmer:
-    """Two-cell wheat task scheduler."""
+    """Three-cell wheat task scheduler."""
 
     CROP = "WHEAT"
 
     PRODUCTION_TILES = (
         (3, 4),
         (2, 4),
+        (3, 3),
     )
 
     SHED_TILE = (4, 4)
@@ -57,15 +49,14 @@ class ReliableFarmer:
         # 1. HARVEST READY CROPS
         # ----------------------------------------------------
 
-        harvest_target = self._best_harvest_target(
+        target = self._best_harvest_target(
             farm.tiles
         )
 
-        if harvest_target is not None:
+        if target is not None:
+            tx, ty = target
 
-            tx, ty = harvest_target
-
-            if (x, y) != (tx, ty):
+            if (x, y) != target:
                 return self._move_toward(
                     x,
                     y,
@@ -77,20 +68,17 @@ class ReliableFarmer:
 
         # ----------------------------------------------------
         # 2. CRITICAL WATER
-        #
-        # Any unwatered active wheat receives priority.
         # ----------------------------------------------------
 
-        critical_water = self._best_water_target(
+        target = self._best_water_target(
             farm.tiles,
             critical_only=True,
         )
 
-        if critical_water is not None:
+        if target is not None:
+            tx, ty = target
 
-            tx, ty = critical_water
-
-            if (x, y) != (tx, ty):
+            if (x, y) != target:
                 return self._move_toward(
                     x,
                     y,
@@ -104,16 +92,15 @@ class ReliableFarmer:
         # 3. NORMAL WATER
         # ----------------------------------------------------
 
-        normal_water = self._best_water_target(
+        target = self._best_water_target(
             farm.tiles,
             critical_only=False,
         )
 
-        if normal_water is not None:
+        if target is not None:
+            tx, ty = target
 
-            tx, ty = normal_water
-
-            if (x, y) != (tx, ty):
+            if (x, y) != target:
                 return self._move_toward(
                     x,
                     y,
@@ -124,7 +111,7 @@ class ReliableFarmer:
             return ["WATER"]
 
         # ----------------------------------------------------
-        # 4. HARVESTED WHEAT → SHED
+        # 4. RETURN HARVESTED WHEAT TO SHED
         # ----------------------------------------------------
 
         carried = self._carried_wheat(state)
@@ -146,7 +133,7 @@ class ReliableFarmer:
             ]
 
         # ----------------------------------------------------
-        # 5. PLANT A SEED ON AN AVAILABLE PRODUCTION CELL
+        # 5. PLANT NEXT SEED
         # ----------------------------------------------------
 
         seeds = int(
@@ -158,15 +145,14 @@ class ReliableFarmer:
 
         if seeds > 0:
 
-            plant_target = self._best_plant_target(
+            target = self._best_plant_target(
                 farm.tiles
             )
 
-            if plant_target is not None:
+            if target is not None:
+                tx, ty = target
 
-                tx, ty = plant_target
-
-                if (x, y) != (tx, ty):
+                if (x, y) != target:
                     return self._move_toward(
                         x,
                         y,
@@ -180,7 +166,7 @@ class ReliableFarmer:
                 ]
 
         # ----------------------------------------------------
-        # 6. NOTHING URGENT
+        # 6. NOTHING TO DO
         # ----------------------------------------------------
 
         return ["PASS"]
@@ -190,13 +176,8 @@ class ReliableFarmer:
     # ========================================================
 
     @classmethod
-    def _best_harvest_target(
-        cls,
-        tiles,
-    ):
-        """
-        Pick the ready production tile with the greatest yield.
-        """
+    def _best_harvest_target(cls, tiles):
+        """Harvest any controlled cell at peak yield."""
 
         candidates = []
 
@@ -211,17 +192,9 @@ class ReliableFarmer:
                 continue
 
             yield_units = int(
-                tile.get(
-                    "yield_units",
-                    0,
-                )
+                tile.get("yield_units", 0)
             )
 
-            if yield_units <= 0:
-                continue
-
-            # V1.1 harvests once wheat reaches the proven
-            # unfertilized peak yield.
             if yield_units >= 4:
                 candidates.append(
                     (
@@ -233,9 +206,7 @@ class ReliableFarmer:
         if not candidates:
             return None
 
-        candidates.sort(
-            key=lambda item: item[0]
-        )
+        candidates.sort()
 
         return candidates[0][1]
 
@@ -247,10 +218,10 @@ class ReliableFarmer:
         critical_only: bool,
     ):
         """
-        Find a wheat cell that has not been watered today.
+        Select the wheat tile requiring water.
 
-        For critical_only=True we prioritize crops with the
-        highest consecutive_unwatered value.
+        Critical crops (consecutive_unwatered >= 1)
+        are prioritized first.
         """
 
         candidates = []
@@ -281,7 +252,6 @@ class ReliableFarmer:
             if critical_only and unwatered < 1:
                 continue
 
-            # Higher risk first.
             candidates.append(
                 (
                     -unwatered,
@@ -303,11 +273,8 @@ class ReliableFarmer:
         return candidates[0][1]
 
     @classmethod
-    def _best_plant_target(
-        cls,
-        tiles,
-    ):
-        """Return the first empty controlled production cell."""
+    def _best_plant_target(cls, tiles):
+        """Return the first empty controlled cell."""
 
         for position in cls.PRODUCTION_TILES:
 
@@ -322,15 +289,12 @@ class ReliableFarmer:
         return None
 
     # ========================================================
-    # STATE HELPERS
+    # HELPERS
     # ========================================================
 
     @staticmethod
-    def _tile_at(
-        tiles,
-        x: int,
-        y: int,
-    ):
+    def _tile_at(tiles, x: int, y: int):
+
         if y < 0 or y >= len(tiles):
             return None
 
@@ -340,7 +304,8 @@ class ReliableFarmer:
         return tiles[y][x]
 
     @staticmethod
-    def _is_wheat(tile) -> bool:
+    def _is_wheat(tile):
+
         return (
             isinstance(tile, dict)
             and tile.get("kind") == "PLANT"
@@ -348,9 +313,7 @@ class ReliableFarmer:
         )
 
     @staticmethod
-    def _carried_wheat(
-        state: ObservationState,
-    ) -> int:
+    def _carried_wheat(state):
 
         if not state.private.inventories:
             return 0
@@ -362,17 +325,13 @@ class ReliableFarmer:
             )
         )
 
-    # ========================================================
-    # MOVEMENT
-    # ========================================================
-
     @staticmethod
     def _move_toward(
         x: int,
         y: int,
         tx: int,
         ty: int,
-    ) -> list[str]:
+    ):
 
         if x < tx:
             return ["EAST"]
