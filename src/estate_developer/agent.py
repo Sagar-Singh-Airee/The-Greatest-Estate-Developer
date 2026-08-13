@@ -4,13 +4,18 @@ The-Greatest-Estate-Developer.
 
 V2.12 Dynamic Economic Production Agent.
 
-V2 chooses:
-    what should occupy a free production slot?
+V4.68:
+    Adds one empirically validated V4 production override.
 
-V1.4 scheduler/executor still determines:
-    how should the farmer execute it?
+Architecture:
 
-Existing healthy crops are never replaced.
+    Observation
+        ↓
+    V4 validated opportunity guard
+        ↓
+        ├── approved → BUY_SEED WHEAT
+        │
+        └── otherwise → unchanged V2 scheduler
 """
 
 from __future__ import annotations
@@ -27,6 +32,10 @@ from estate_developer.planning.generator import (
 
 from estate_developer.planning.scheduler import (
     TaskScheduler,
+)
+
+from estate_developer.planning.v4_override import (
+    V4ValidatedOverride,
 )
 
 
@@ -48,51 +57,80 @@ class EstateDeveloperAgent:
 
         self.scheduler = TaskScheduler()
 
+        # ----------------------------------------------------
+        # V4 validated override.
+        #
+        # V2 remains the fallback controller.
+        # ----------------------------------------------------
+
+        self.v4_override = (
+            V4ValidatedOverride()
+        )
+
     def step(
         self,
         obs: dict[str, Any],
     ) -> dict[str, Any]:
 
-        state = self.parser.parse(obs)
+        # ----------------------------------------------------
+        # V4 VALIDATED OVERRIDE
+        # ----------------------------------------------------
+
+        v4_crop = (
+            self.v4_override.observe(
+                obs
+            )
+        )
+
+        if v4_crop == "WHEAT":
+
+            return {
+                "farmer": [
+                    "PASS"
+                ],
+                "hands": [],
+                "market": [
+                    [
+                        "BUY_SEED",
+                        "WHEAT",
+                        1,
+                    ]
+                ],
+            }
 
         # ----------------------------------------------------
-        # Generate dynamic tasks.
+        # NORMAL V2 PATH — UNCHANGED
         # ----------------------------------------------------
+
+        state = self.parser.parse(
+            obs
+        )
 
         tasks = self.generator.generate(
             state,
-            max_active_wheat=self.MAX_PRODUCTION_SLOTS,
+            max_active_wheat=(
+                self.MAX_PRODUCTION_SLOTS
+            ),
         )
-
-        # ----------------------------------------------------
-        # Select highest-value executable task.
-        # ----------------------------------------------------
 
         selected = self.scheduler.choose(
             tasks,
             state,
         )
 
-        # ----------------------------------------------------
-        # Farmer action.
-        # ----------------------------------------------------
-
-        farmer_action = self.scheduler.farmer_action(
-            selected,
-            state,
+        farmer_action = (
+            self.scheduler.farmer_action(
+                selected,
+                state,
+            )
         )
-
-        # ----------------------------------------------------
-        # Market orders.
-        # ----------------------------------------------------
 
         market_orders = []
 
-        # ----------------------------------------------------
-        # Economic seed purchase.
-        # ----------------------------------------------------
-
-        if selected.task_type.value == "BUY_SEED":
+        if (
+            selected.task_type.value
+            == "BUY_SEED"
+        ):
 
             if selected.crop is not None:
 
@@ -107,11 +145,7 @@ class EstateDeveloperAgent:
                     ]
                 )
 
-        # ----------------------------------------------------
-        # Sell completed inventory already in shed.
-        #
-        # Selling happens separately from the farmer action.
-        # ----------------------------------------------------
+        # V2 selling remains untouched.
 
         for crop in self.CANDIDATE_CROPS:
 
@@ -146,4 +180,6 @@ def agent(
     obs: dict[str, Any],
 ) -> dict[str, Any]:
 
-    return _agent.step(obs)
+    return _agent.step(
+        obs
+    )
