@@ -229,23 +229,13 @@ class TaskScheduler:
 
         elif task.task_type == TaskType.PLACE:
 
-            market_price = float(
-                state.market.prices.get(
-                    task.crop or "WHEAT",
-                    0,
-                )
-            )
-
-            economic_value = (
-                max(1, task.quantity)
-                * market_price
-            )
-
-            score += (
-                self.VALUE_WEIGHT
-                * 0.5
-                * economic_value
-            )
+            # PLACE is logistics, not a revenue-generating
+            # action. The harvested goods already exist.
+            #
+            # Do not add their market value to PLACE, otherwise
+            # a large carried batch can overwhelm urgent
+            # replacement-seed / planting decisions.
+            score += 0.0
 
         # ----------------------------------------------------
         # PLANT

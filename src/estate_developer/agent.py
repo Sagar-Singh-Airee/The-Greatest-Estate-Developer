@@ -32,7 +32,7 @@ from estate_developer.planning.scheduler import (
 
 class EstateDeveloperAgent:
 
-    MAX_PRODUCTION_SLOTS = 5
+    MAX_PRODUCTION_SLOTS = 9
 
     CANDIDATE_CROPS = (
         "WHEAT",

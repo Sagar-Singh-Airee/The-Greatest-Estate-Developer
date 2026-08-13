@@ -41,6 +41,11 @@ from estate_developer.economics.market import (
     simulate_sale,
 )
 
+from estate_developer.planning.production_capacity import (
+    discover_production_tiles,
+    count_active_production,
+)
+
 
 @dataclass(frozen=True)
 class SlotCandidate:
@@ -82,14 +87,6 @@ class ProductionSlotAllocator:
 
     MAX_PRODUCTION_SLOTS = 5
 
-    PRODUCTION_TILES = (
-        (3, 4),
-        (2, 4),
-        (3, 3),
-        (2, 3),
-        (1, 3),
-    )
-
     # --------------------------------------------------------
     # Current validated one-time candidates.
     # --------------------------------------------------------
@@ -117,23 +114,35 @@ class ProductionSlotAllocator:
         state,
     ) -> int:
         """
-        Count currently active one-time production crops.
+        Count active one-time production crops across
+        the dynamically discovered farm.
+
+        Only the allocator's validated one-time crop set
+        counts toward production utilization.
         """
 
         count = 0
 
-        for x, y in self.PRODUCTION_TILES:
+        for row in state.me.tiles:
 
-            tile = self._tile_at(
-                state.me.tiles,
-                x,
-                y,
-            )
+            for tile in row:
 
-            if (
-                isinstance(tile, dict)
-                and tile.get("kind") == "PLANT"
-            ):
+                if not isinstance(
+                    tile,
+                    dict,
+                ):
+                    continue
+
+                if tile.get(
+                    "kind"
+                ) != "PLANT":
+                    continue
+
+                if tile.get(
+                    "crop"
+                ) not in self.ONE_TIME_CROPS:
+                    continue
+
                 count += 1
 
         return count
@@ -143,16 +152,33 @@ class ProductionSlotAllocator:
         state,
     ) -> int:
         """
-        Return the number of free production slots.
+        Return free production capacity.
+
+        Physical capacity is discovered dynamically from
+        unlocked empty farm tiles.
+
+        MAX_PRODUCTION_SLOTS remains the economic utilization
+        ceiling so V2.39's five-slot policy is preserved.
         """
 
         active = self.count_active_slots(
             state
         )
 
-        return max(
+        physical_free = len(
+            discover_production_tiles(
+                state.me.tiles
+            )
+        )
+
+        policy_free = max(
             0,
             self.MAX_PRODUCTION_SLOTS - active,
+        )
+
+        return min(
+            physical_free,
+            policy_free,
         )
 
     def evaluate(

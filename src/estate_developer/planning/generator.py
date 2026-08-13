@@ -29,6 +29,11 @@ from estate_developer.planning.tasks import (
     TaskType,
 )
 
+from estate_developer.planning.production_capacity import (
+    discover_production_tiles,
+    count_active_production,
+)
+
 
 class TaskGenerator:
 
@@ -37,14 +42,6 @@ class TaskGenerator:
     # --------------------------------------------------------
 
     MAX_PRODUCTION_SLOTS = 5
-
-    PRODUCTION_TILES = (
-        (3, 4),
-        (2, 4),
-        (3, 3),
-        (2, 3),
-        (1, 3),
-    )
 
     # Economic candidates currently validated.
     CANDIDATE_CROPS = (
@@ -55,11 +52,11 @@ class TaskGenerator:
 
     # Task priorities.
     HARVEST_PRIORITY = 1000
+    PLANT_PRIORITY = 950
     WATER_CRITICAL_PRIORITY = 900
     WATER_NORMAL_PRIORITY = 800
     PLACE_PRIORITY = 700
-    PLANT_PRIORITY = 600
-    BUY_SEED_PRIORITY = 500
+    BUY_SEED_PRIORITY = 990
 
     def __init__(self) -> None:
         self.allocator = ProductionSlotAllocator()
@@ -87,114 +84,122 @@ class TaskGenerator:
 
         tasks: list[FarmTask] = []
 
-        active_slots = 0
-
-        # ----------------------------------------------------
-        # 1. Scan the controlled production area.
-        # ----------------------------------------------------
-
-        for x, y in self.PRODUCTION_TILES:
-
-            tile = self._tile_at(
-                state.me.tiles,
-                x,
-                y,
+        # Physical production capacity is discovered
+        # dynamically from the live farm.
+        production_tiles = (
+            discover_production_tiles(
+                state.me.tiles
             )
+        )
 
-            if tile == "LOCKED":
-                continue
+        # The economic utilization ceiling remains
+        # MAX_PRODUCTION_SLOTS = 5.
+        active_slots = count_active_production(
+            state.me.tiles
+        )
 
-            # Empty slot.
-            if tile is None:
-                continue
+        # ----------------------------------------------------
+        # 1. Scan all active production crops.
+        # ----------------------------------------------------
 
-            # Only actual plant objects count as occupied
-            # production slots.
-            if not isinstance(tile, dict):
-                continue
+        for y, row in enumerate(
+            state.me.tiles
+        ):
 
-            if tile.get("kind") != "PLANT":
-                continue
-
-            crop = tile.get("crop")
-
-            if crop not in self.CANDIDATE_CROPS:
-                continue
-
-            active_slots += 1
-
-            # ------------------------------------------------
-            # HARVEST
-            # ------------------------------------------------
-
-            if self._is_harvest_ready(
-                tile,
-                crop,
+            for x, tile in enumerate(
+                row
             ):
 
-                tasks.append(
-                    FarmTask(
-                        task_type=TaskType.HARVEST,
-                        priority=self.HARVEST_PRIORITY,
-                        target=(x, y),
-                        crop=crop,
-                        reason=(
-                            f"{crop.lower()} reached "
-                            "peak batch yield"
-                        ),
-                    )
+                if not isinstance(
+                    tile,
+                    dict,
+                ):
+                    continue
+
+                if tile.get(
+                    "kind"
+                ) != "PLANT":
+                    continue
+
+                crop = tile.get(
+                    "crop"
                 )
 
-                # Harvest is more important than routine water.
-                continue
+                if crop not in self.CANDIDATE_CROPS:
+                    continue
 
-            # ------------------------------------------------
-            # WATER
-            # ------------------------------------------------
+                # ------------------------------------------------
+                # HARVEST
+                # ------------------------------------------------
 
-            if not tile.get(
-                "watered_today",
-                False,
-            ):
+                if self._is_harvest_ready(
+                    tile,
+                    crop,
+                ):
 
-                unwatered = int(
-                    tile.get(
-                        "consecutive_unwatered",
-                        0,
-                    )
-                )
-
-                if unwatered >= 1:
-
-                    priority = (
-                        self.WATER_CRITICAL_PRIORITY
-                    )
-
-                    reason = (
-                        f"{crop.lower()} is approaching "
-                        "watering failure"
+                    tasks.append(
+                        FarmTask(
+                            task_type=TaskType.HARVEST,
+                            priority=self.HARVEST_PRIORITY,
+                            target=(x, y),
+                            crop=crop,
+                            reason=(
+                                f"{crop.lower()} reached "
+                                "peak batch yield"
+                            ),
+                        )
                     )
 
-                else:
+                    # Harvest outranks routine watering.
+                    continue
 
-                    priority = (
-                        self.WATER_NORMAL_PRIORITY
+                # ------------------------------------------------
+                # WATER
+                # ------------------------------------------------
+
+                if not tile.get(
+                    "watered_today",
+                    False,
+                ):
+
+                    unwatered = int(
+                        tile.get(
+                            "consecutive_unwatered",
+                            0,
+                        )
                     )
 
-                    reason = (
-                        f"{crop.lower()} requires "
-                        "daily watering"
-                    )
+                    if unwatered >= 1:
 
-                tasks.append(
-                    FarmTask(
-                        task_type=TaskType.WATER,
-                        priority=priority,
-                        target=(x, y),
-                        crop=crop,
-                        reason=reason,
+                        priority = (
+                            self.WATER_CRITICAL_PRIORITY
+                        )
+
+                        reason = (
+                            f"{crop.lower()} is approaching "
+                            "watering failure"
+                        )
+
+                    else:
+
+                        priority = (
+                            self.WATER_NORMAL_PRIORITY
+                        )
+
+                        reason = (
+                            f"{crop.lower()} requires "
+                            "daily watering"
+                        )
+
+                    tasks.append(
+                        FarmTask(
+                            task_type=TaskType.WATER,
+                            priority=priority,
+                            target=(x, y),
+                            crop=crop,
+                            reason=reason,
+                        )
                     )
-                )
 
         # ----------------------------------------------------
         # 2. Harvested inventory → shed.
@@ -292,9 +297,7 @@ class TaskGenerator:
 
                     # Never buy if carrying goods or if a crop
                     # is still waiting in the shed.
-                    if not self._farmer_carrying_any_candidate(
-                        state
-                    ) and not self._shed_contains_candidate(
+                    if not self._shed_contains_candidate(
                         state
                     ):
 
@@ -468,15 +471,13 @@ class TaskGenerator:
         self,
         tiles,
     ):
-        for x, y in self.PRODUCTION_TILES:
-
-            tile = self._tile_at(
-                tiles,
-                x,
-                y,
+        production_tiles = (
+            discover_production_tiles(
+                tiles
             )
+        )
 
-            if tile is None:
-                return (x, y)
+        if not production_tiles:
+            return None
 
-        return None
+        return production_tiles[0]
