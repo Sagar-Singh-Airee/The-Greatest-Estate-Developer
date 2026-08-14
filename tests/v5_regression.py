@@ -31,9 +31,14 @@ fires at most once per episode.
 
 from __future__ import annotations
 
-from estate_developer.planning.v4_override import (
-    V4ValidatedOverride,
-)
+try:
+    from estate_developer.planning.v4_override import (
+        V4ValidatedOverride,
+    )
+    _V4_AVAILABLE = True
+except ModuleNotFoundError:
+    _V4_AVAILABLE = False
+    V4ValidatedOverride = None  # type: ignore
 
 
 def _obs(
@@ -334,6 +339,11 @@ def test_single_use():
 
 
 def run():
+    if not _V4_AVAILABLE:
+        print("\n========== V5.1 REGRESSION ==========")
+        print("SKIPPED: v4_override module removed in V11 cleanup.")
+        print("=====================================")
+        return
     test_validated_step_483()
     test_single_wave_does_not_trigger()
     test_incomplete_wave_does_not_trigger()

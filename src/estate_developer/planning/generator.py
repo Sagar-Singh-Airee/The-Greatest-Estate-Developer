@@ -457,13 +457,11 @@ class TaskGenerator:
                             )
                         )
 
-                    # 2. Queue a market BUY_ANIMAL order.
-                    # This is flagged via a BUY_SEED task type with
-                    # crop=chosen so the agent loop can recognise it.
+                    # 2. Queue a properly-typed BUY_ANIMAL market order.
                     if state.me.money >= animal_profile["cost"]:
                         tasks.append(
                             FarmTask(
-                                task_type=TaskType.BUY_SEED,  # reuse for market dispatch
+                                task_type=TaskType.BUY_ANIMAL,
                                 priority=self.BUY_SEED_PRIORITY,
                                 crop=chosen,
                                 quantity=1,
@@ -571,24 +569,20 @@ class TaskGenerator:
         if manual_tasks >= hands_count + 2 and state.me.money >= hire_cost + 300:
             tasks.append(
                 FarmTask(
-                    task_type=TaskType.BUY_SEED, # We overload BUY_SEED for market orders
+                    task_type=TaskType.HIRE,
                     priority=self.BUY_SEED_PRIORITY + 1,
-                    crop="HIRE", 
                     quantity=1,
                     reason="hire additional worker to clear task backlog"
                 )
             )
             
         # If we are capped on production slots physically but the allocator wants to build more
-        # buying land costs 1000
         physical_free = len(self._find_empty_production_tiles(state.me.tiles))
         if physical_free == 0 and active_slots < self.MAX_PRODUCTION_SLOTS and state.me.money >= 1300:
-            # We need to find which quadrant to unlock next (simplification: just issue BUY_LAND)
             tasks.append(
                 FarmTask(
-                    task_type=TaskType.BUY_SEED, 
+                    task_type=TaskType.BUY_LAND,
                     priority=self.BUY_SEED_PRIORITY + 2,
-                    crop="BUY_LAND",
                     quantity=1,
                     reason="buy land to increase production capacity"
                 )

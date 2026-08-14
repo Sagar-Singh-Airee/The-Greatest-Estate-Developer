@@ -33,18 +33,35 @@ class BeamSearchPlanner:
 
     def generate_candidate_actions(
         self, state: ObservationState,
+        opponent_model=None,
     ) -> list[dict[str, Any]]:
         """
         Generate sensible candidate actions for a single turn.
         Returns up to `beam_width` distinct action dicts.
+
+        KEY FIX: Market orders are now determined by MarketManager
+        directly here, so the action we SCORE is exactly the action
+        we EXECUTE. No post-search mutation.
         """
+        from estate_developer.planning.tasks import TaskType
+        from estate_developer.economics.market_manager import MarketManager
+
+        market_manager = MarketManager()
         tasks = self.generator.generate(state)
 
         if not tasks:
-            from estate_developer.planning.tasks import FarmTask, TaskType
+            from estate_developer.planning.tasks import FarmTask
             tasks = [FarmTask(task_type=TaskType.PASS, priority=0)]
 
-        top_tasks = tasks[: self.beam_width]
+        # Widen the search window: consider up to beam_width*2 tasks,
+        # not just the top 3. This prevents strategic actions buried
+        # in the queue from being permanently ignored.
+        top_tasks = tasks[: max(self.beam_width * 2, 6)]
+
+        # Authoritative market sell orders for THIS state
+        sell_orders = market_manager.get_optimal_sell_orders(
+            state, opponent_model=opponent_model
+        )
 
         candidates: list[dict[str, Any]] = []
         for selected_task in top_tasks:
@@ -52,31 +69,23 @@ class BeamSearchPlanner:
                 selected_task, state,
             )
 
-            market_orders: list[list[Any]] = []
-            if (
-                selected_task.task_type.value == "BUY_SEED"
-                and selected_task.crop
-            ):
-                animal_names = ("GOOSE", "COW", "SHEEP")
-                if selected_task.crop in animal_names:
-                    market_orders.append(
-                        ["BUY_ANIMAL", selected_task.crop, 1]
-                    )
-                else:
-                    market_orders.append(
-                        [
-                            "BUY_SEED",
-                            selected_task.crop,
-                            max(1, selected_task.quantity),
-                        ]
-                    )
+            # Build market orders for this candidate.
+            # Start from the authoritative sell decisions.
+            market_orders: list[list[Any]] = list(sell_orders)
 
-            # Naive sell fallback — trajectory_planner replaces
-            # with strategic sells.
-            for crop in self.generator.CANDIDATE_CROPS:
-                quantity = int(state.private.shed.get(crop, 0))
-                if quantity > 0:
-                    market_orders.append(["SELL", crop, quantity])
+            tt = selected_task.task_type
+            if tt == TaskType.BUY_SEED and selected_task.crop:
+                market_orders.append(
+                    ["BUY_SEED", selected_task.crop, max(1, selected_task.quantity)]
+                )
+            elif tt == TaskType.BUY_ANIMAL and selected_task.crop:
+                market_orders.append(
+                    ["BUY_ANIMAL", selected_task.crop, max(1, selected_task.quantity)]
+                )
+            elif tt == TaskType.HIRE:
+                market_orders.append(["HIRE"])
+            elif tt == TaskType.BUY_LAND:
+                market_orders.append(["BUY_LAND"])
 
             remaining_tasks = [
                 t for t in tasks if t is not selected_task
@@ -100,7 +109,7 @@ class BeamSearchPlanner:
                 seen.add(rep)
                 unique.append(cand)
 
-        return unique
+        return unique[:self.beam_width]
 
     # ============================================================
     # FORWARD SIMULATE A SINGLE ACTION

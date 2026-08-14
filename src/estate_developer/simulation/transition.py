@@ -55,20 +55,17 @@ def apply_action(state: ObservationState, action_dict: dict[str, Any]) -> None:
             in_shed = private_state.shed.get(item, 0)
             sell_qty = min(qty, in_shed)
             if sell_qty > 0:
-                # Simplification: selling at base price for simulator.
-                # Full sim would track market inventory.
-                base_price = 25
-                if item in CROP_PROFILES:
-                    base_price = CROP_PROFILES[item].base_price
-                elif item == "GOOSE": base_price = 50
-                elif item == "MILK": base_price = 160
-                elif item == "WOOL": base_price = 200
-                elif item == "EGG": base_price = 50
-                elif item == "FERTILIZER": base_price = 100
-                
-                revenue = base_price * sell_qty
+                from estate_developer.economics.market_manager import MarketManager
+                manager = MarketManager()
+                current_inv = state.market.inventory.get(item, manager.I0)
+                unit_price = state.market.prices.get(item, manager.calculate_price(item, current_inv))
+                revenue = unit_price * sell_qty
                 object.__setattr__(player_farm, "money", player_farm.money + revenue)
                 private_state.shed[item] -= sell_qty
+                # Update simulated market inventory if present
+                state.market.inventory[item] = current_inv + sell_qty
+                # We could recalculate state.market.prices here, but for rollout we leave it or approximate it
+                state.market.prices[item] = manager.calculate_price(item, state.market.inventory[item])
                 
         elif op == "BUY_LAND":
             # Simplification: deduct $1000 for simplicity in this stub.
@@ -280,8 +277,66 @@ def tick_environment(state: ObservationState) -> None:
     """
     Simulates the passage of one tick (e.g. crop growth, day boundary).
     """
-    # For now, approximate growth every tick or at day boundaries.
-    # We will simply grow crops based on ticks.
-    # In Kaggriculture, there are typically multiple ticks per day.
-    # We need a robust approximation.
-    pass
+    new_step = state.step + 1
+    object.__setattr__(state, "step", new_step)
+    
+    # 24 steps per day assumption
+    new_day = new_step // 24
+    new_hour = new_step % 24
+    is_new_day = (new_day > state.day)
+    
+    object.__setattr__(state, "day", new_day)
+    object.__setattr__(state, "hour", new_hour)
+    
+    # Process market drain on day boundary
+    if is_new_day:
+        for item in list(state.market.inventory.keys()):
+            current = state.market.inventory[item]
+            consumed = max(1, int(current * 0.05)) # Approximate town consumption
+            state.market.inventory[item] = max(0, current - consumed)
+            
+    # Process farms
+    for farm in state.farms:
+        for y in range(len(farm.tiles)):
+            for x in range(len(farm.tiles[y])):
+                tile = farm.tiles[y][x]
+                if not isinstance(tile, dict):
+                    continue
+                
+                kind = tile.get("kind")
+                if kind == "PLANT" and is_new_day:
+                    if tile.get("watered_today"):
+                        tile["age"] = tile.get("age", 0) + 1
+                        tile["consecutive_unwatered"] = 0
+                        
+                        crop = tile.get("crop")
+                        profile = CROP_PROFILES.get(crop)
+                        if profile:
+                            age = tile["age"]
+                            if age == profile.time_to_first_yield:
+                                tile["yield_units"] = profile.max_yield
+                            elif profile.subsequent_yields and age > profile.time_to_first_yield:
+                                tile["yield_units"] = profile.max_yield
+                    else:
+                        tile["consecutive_unwatered"] = tile.get("consecutive_unwatered", 0) + 1
+                        if tile["consecutive_unwatered"] >= 3:
+                            farm.tiles[y][x] = {"kind": "WEED"}
+                            
+                    tile["watered_today"] = False
+                    
+                elif kind in ("COOP", "PASTURE") and is_new_day:
+                    animal = tile.get("animal")
+                    if animal:
+                        if tile.get("fed_today"):
+                            tile["consecutive_unfed"] = 0
+                            tile["yield_units"] = tile.get("yield_units", 0) + 1
+                            if not tile.get("fertilizer_available"):
+                                tile["fertilizer_available"] = True
+                        else:
+                            tile["consecutive_unfed"] = tile.get("consecutive_unfed", 0) + 1
+                            if tile["consecutive_unfed"] >= 3:
+                                tile["animal"] = None
+                                tile["yield_units"] = 0
+                                
+                        tile["fed_today"] = False
+                        tile["cared_today"] = False

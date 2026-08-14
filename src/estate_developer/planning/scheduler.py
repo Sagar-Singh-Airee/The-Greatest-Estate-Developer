@@ -272,12 +272,13 @@ class TaskScheduler:
                 * market_price
             )
 
-        # ----------------------------------------------------
-        # BUY SEED
-        # ----------------------------------------------------
-
-        elif task.task_type == TaskType.BUY_SEED:
-
+        # BUY_SEED/BUY_ANIMAL/HIRE/BUY_LAND are market-only; no farmer action.
+        elif task.task_type in (
+            TaskType.BUY_SEED,
+            TaskType.BUY_ANIMAL,
+            TaskType.HIRE,
+            TaskType.BUY_LAND,
+        ):
             # Buying itself has no direct revenue. Keep the
             # action useful but below execution-critical work.
             score += 0.0
@@ -344,8 +345,13 @@ class TaskScheduler:
         x = state.me.farmer.x
         y = state.me.farmer.y
 
-        # BUY_SEED is market-only.
-        if task.task_type == TaskType.BUY_SEED:
+        # Market-only tasks — farmer does nothing.
+        if task.task_type in (
+            TaskType.BUY_SEED,
+            TaskType.BUY_ANIMAL,
+            TaskType.HIRE,
+            TaskType.BUY_LAND,
+        ):
             return ["PASS"]
 
         if task.task_type == TaskType.PASS:

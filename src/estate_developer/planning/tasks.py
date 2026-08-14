@@ -12,6 +12,9 @@ from enum import Enum
 class TaskType(str, Enum):
 
     BUY_SEED = "BUY_SEED"
+    BUY_ANIMAL = "BUY_ANIMAL"
+    HIRE = "HIRE"
+    BUY_LAND = "BUY_LAND"
     HARVEST = "HARVEST"
     WATER = "WATER"
     PLACE = "PLACE"
