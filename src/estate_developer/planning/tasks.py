@@ -16,6 +16,13 @@ class TaskType(str, Enum):
     WATER = "WATER"
     PLACE = "PLACE"
     PLANT = "PLANT"
+    BUILD_COOP = "BUILD_COOP"
+    BUILD_PASTURE = "BUILD_PASTURE"
+    DIG = "DIG"
+    FERTILIZE = "FERTILIZE"
+    FEED = "FEED"
+    CARE = "CARE"
+    COLLECT_FERTILIZER = "COLLECT_FERTILIZER"
     PASS = "PASS"
 
 

@@ -224,6 +224,21 @@ class TaskScheduler:
             )
 
         # ----------------------------------------------------
+        # NEW ANIMAL / GENERAL TASKS
+        # ----------------------------------------------------
+        elif task.task_type in (
+            TaskType.FEED,
+            TaskType.CARE,
+            TaskType.COLLECT_FERTILIZER,
+            TaskType.FERTILIZE,
+            TaskType.BUILD_COOP,
+            TaskType.BUILD_PASTURE,
+            TaskType.DIG
+        ):
+            # For these, priority is already heavily managed by generator
+            score += 0.0
+
+        # ----------------------------------------------------
         # PLACE VALUE
         # ----------------------------------------------------
 
@@ -394,6 +409,27 @@ class TaskScheduler:
                 "PLANT",
                 task.crop,
             ]
+            
+        if task.task_type == TaskType.BUILD_COOP:
+            return ["BUILD_COOP"]
+            
+        if task.task_type == TaskType.BUILD_PASTURE:
+            return ["BUILD_PASTURE"]
+            
+        if task.task_type == TaskType.DIG:
+            return ["DIG"]
+            
+        if task.task_type == TaskType.FERTILIZE:
+            return ["FERTILIZE"]
+            
+        if task.task_type == TaskType.FEED:
+            return ["FEED"]
+            
+        if task.task_type == TaskType.CARE:
+            return ["CARE"]
+            
+        if task.task_type == TaskType.COLLECT_FERTILIZER:
+            return ["COLLECT_FERTILIZER"]
 
         return ["PASS"]
 
