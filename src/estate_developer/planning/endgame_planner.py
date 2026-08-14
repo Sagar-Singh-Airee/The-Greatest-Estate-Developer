@@ -5,6 +5,7 @@ from estate_developer.state.parser import ObservationState
 from estate_developer.planning.generator import TaskGenerator
 from estate_developer.planning.scheduler import TaskScheduler
 from estate_developer.execution.hand_assignment import HandAssignmentSolver
+from estate_developer.simulation.reference_rules import EPISODE_STEPS
 
 
 class EndgamePlanner:
@@ -23,14 +24,17 @@ class EndgamePlanner:
         self.scheduler = TaskScheduler()
         self.hand_solver = HandAssignmentSolver()
 
-    def is_endgame(self, state: ObservationState, max_steps: int = 1000) -> bool:
+    def is_endgame(self, state: ObservationState, max_steps: int = EPISODE_STEPS) -> bool:
         """
         Determines if the game is entering the endgame window.
+        
+        EPISODE_STEPS = 720 (30 days × 24 hours).
+        Endgame begins when fewer than 45 steps remain.
         """
         remaining = max_steps - state.step
         return remaining <= 45
 
-    def plan_liquidation(self, state: ObservationState, max_steps: int = 1000) -> list[dict[str, Any]]:
+    def plan_liquidation(self, state: ObservationState, max_steps: int = EPISODE_STEPS) -> list[dict[str, Any]]:
         """
         Generates a sequence of actions tailored for the endgame.
         """

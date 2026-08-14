@@ -89,7 +89,7 @@ class ProductionSlotAllocator:
     # Three-slot capacity discovered empirically.
     # --------------------------------------------------------
 
-    MAX_PRODUCTION_SLOTS = 5
+    MAX_PRODUCTION_SLOTS = 100
 
     # --------------------------------------------------------
     # Current validated one-time candidates.
@@ -98,12 +98,16 @@ class ProductionSlotAllocator:
     BATCH_SIZES = {
         "WHEAT": 4,
         "CARROT": 3,
+        "TOMATO": 4,
+        "STRAWBERRY": 4,
         "MELON": 6,
     }
 
     ONE_TIME_CROPS = (
         "WHEAT",
         "CARROT",
+        "TOMATO",
+        "STRAWBERRY",
         "MELON",
     )
 

@@ -38,15 +38,17 @@ from estate_developer.planning.production_capacity import (
 class TaskGenerator:
 
     # --------------------------------------------------------
-    # Fixed execution capacity discovered empirically.
+    # Unleash capacity limits for industrial farming
     # --------------------------------------------------------
 
-    MAX_PRODUCTION_SLOTS = 5
+    MAX_PRODUCTION_SLOTS = 100
 
     # Economic candidates currently validated.
     CANDIDATE_CROPS = (
         "WHEAT",
         "CARROT",
+        "TOMATO",
+        "STRAWBERRY",
         "MELON",
     )
 
@@ -556,7 +558,7 @@ class TaskGenerator:
         # 5. Dynamic Expansion (Hire / Buy Land)
         # ----------------------------------------------------
         
-        # If we have lots of active tasks and excess cash, hire!
+        # If we have task backlog and minimal cash buffer, hire!
         # Base hire cost is 200, +50 for each previous hire.
         hires_today = state.me.hires_today
         hire_cost = 200 + (hires_today * 50)
@@ -565,26 +567,27 @@ class TaskGenerator:
         manual_tasks = sum(1 for t in tasks if t.task_type.value not in ("PASS", "BUY_SEED") and t.priority >= self.WATER_NORMAL_PRIORITY)
         hands_count = len(state.me.hands)
         
-        # If we have at least 2 more high-priority tasks than hands, and plenty of cash buffer
-        if manual_tasks >= hands_count + 2 and state.me.money >= hire_cost + 300:
+        # Aggressive industrial hiring: Any backlog + 150 buffer triggers a hire.
+        if manual_tasks > hands_count and state.me.money >= hire_cost + 150:
             tasks.append(
                 FarmTask(
                     task_type=TaskType.HIRE,
                     priority=self.BUY_SEED_PRIORITY + 1,
                     quantity=1,
-                    reason="hire additional worker to clear task backlog"
+                    reason="hire additional worker to aggressively clear task backlog"
                 )
             )
             
-        # If we are capped on production slots physically but the allocator wants to build more
+        # Aggressive expansion: Buy land immediately if physically out of space,
+        # provided we have 1500 to cover the land and immediate seed costs.
         physical_free = len(self._find_empty_production_tiles(state.me.tiles))
-        if physical_free == 0 and active_slots < self.MAX_PRODUCTION_SLOTS and state.me.money >= 1300:
+        if physical_free == 0 and active_slots < self.MAX_PRODUCTION_SLOTS and state.me.money >= 1500:
             tasks.append(
                 FarmTask(
                     task_type=TaskType.BUY_LAND,
                     priority=self.BUY_SEED_PRIORITY + 2,
                     quantity=1,
-                    reason="buy land to increase production capacity"
+                    reason="buy land for industrial capacity expansion"
                 )
             )
 

@@ -34,7 +34,8 @@ def build_single_file_submission(output_filename="submission.py"):
     encoded_tar = base64.b64encode(tar_bytes).decode('ascii')
     
     # 3. Write the self-extracting submission.py
-    print(f"Writing {output_filename}...")
+    out_path = os.path.join(project_root, "kaggle", output_filename)
+    print(f"Writing {out_path}...")
     
     submission_code = f'''"""
 Kaggriculture Agent - The Greatest Estate Developer
@@ -74,11 +75,11 @@ from main import agent
 
 '''
     
-    with open(output_filename, "w", encoding="utf-8") as f:
+    with open(out_path, "w", encoding="utf-8") as f:
         f.write(submission_code)
         
-    print(f"Done! Created {output_filename} ({os.path.getsize(output_filename) / 1024:.1f} KB)")
-    print(f"You can now submit {output_filename} to Kaggle.")
+    print(f"Done! Created {out_path} ({os.path.getsize(out_path) / 1024:.1f} KB)")
+    print(f"You can now submit {out_path} to Kaggle.")
 
 if __name__ == "__main__":
     build_single_file_submission("submission.py")

@@ -38,8 +38,8 @@ class BeamSearchPlanner:
 
     def __init__(
         self,
-        beam_width: int = 3,
-        max_depth: int = 1,
+        beam_width: int = 5,
+        max_depth: int = 3,
     ):
         self.beam_width = beam_width
         self.max_depth = max_depth

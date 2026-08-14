@@ -103,6 +103,16 @@ class MarketManager:
             current_price = float(market_prices.get(resource, self.calculate_price(resource, current_inv)))
             base_price = self.MARKET_PARAMS.get(resource, {}).get("base", 0)
 
+            # --- Predatory Front-Running ---
+            # If the opponent is about to sell the same crop, dump everything NOW
+            # to crash the price for them, overriding any hold logic.
+            is_opp_dominant = (opp_dominant == resource)
+            sell_qty = int(quantity)
+            
+            if is_opp_dominant:
+                orders.append(["SELL", resource, sell_qty])
+                continue
+
             # --- Hold logic: will price rise significantly in 3 days? ---
             should_hold = (
                 not needs_space
@@ -118,19 +128,6 @@ class MarketManager:
 
             if should_hold:
                 continue
-
-            # --- Opponent stagger: sell half if opponent likely selling same ---
-            sell_qty = int(quantity)
-            if (
-                opp_dominant == resource
-                and not needs_space
-                and sell_qty > 2
-            ):
-                opp_volume = 0
-                if opponent_model is not None:
-                    opp_volume = opponent_model.estimated_sell_volume(resource)
-                if opp_volume > 0:
-                    sell_qty = max(1, sell_qty // 2)
 
             # Sell if price is near or above base, or we need space
             if current_price >= base_price * 0.9 or needs_space:
