@@ -409,45 +409,32 @@ class TaskGenerator:
                     break
 
         # ----------------------------------------------------
-        # 2. Harvested inventory → shed.
+        # 2. Harvested inventory → shed (Farmer AND all hands).
         # ----------------------------------------------------
-
-        inventory = (
-            state.private.inventories[0]
-            if state.private.inventories
-            else {}
-        )
 
         # Include animal products in the shed-transfer scan
         ALL_SELLABLE = list(self.CANDIDATE_CROPS) + [
             "EGG", "MILK", "WOOL", "FERTILIZER",
         ]
 
-        for item in ALL_SELLABLE:
-
-            quantity = int(
-                inventory.get(
-                    item,
-                    0,
-                )
-            )
-
-            if quantity > 0:
-
-                tasks.append(
-                    FarmTask(
-                        task_type=TaskType.PLACE,
-                        priority=self.PLACE_PRIORITY,
-                        crop=item,
-                        quantity=quantity,
-                        reason=(
-                            f"move harvested "
-                            f"{item.lower()} to shed"
-                        ),
-                    )
-                )
-
-                break
+        if getattr(state.private, "inventories", None):
+            # Generate one PLACE task for every carried item across all inventories.
+            # We set the target to the corner of the shed (4, 4) so that the HandAssignmentSolver
+            # has a coordinate for pathfinding. Without a target, HandAssignmentSolver ignores the task!
+            for inv_index, inventory in enumerate(state.private.inventories):
+                for item in ALL_SELLABLE:
+                    quantity = int(inventory.get(item, 0))
+                    if quantity > 0:
+                        tasks.append(
+                            FarmTask(
+                                task_type=TaskType.PLACE,
+                                priority=self.PLACE_PRIORITY,
+                                target=(4, 4),  # target required for HandAssignmentSolver!
+                                crop=item,
+                                quantity=quantity,
+                                reason=f"move harvested {item.lower()} to shed (inventory {inv_index})",
+                            )
+                        )
 
         # ----------------------------------------------------
         # 3. Economic allocation of a FREE slot.
@@ -552,11 +539,9 @@ class TaskGenerator:
 
                     crop = chosen
 
+                    # The number of available seeds of this exact crop.
                     seed_count = int(
-                        state.private.seeds.get(
-                            crop,
-                            0,
-                        )
+                        state.private.seeds.get(crop, 0)
                     )
 
                     # Plant immediately if the correct seed exists —
