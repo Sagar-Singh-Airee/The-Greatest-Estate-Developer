@@ -1710,9 +1710,14 @@ def consume_town_demand(
 
             for item in products:
 
+                current_inventory = market.inventory.get(
+                    item,
+                    0,
+                )
+
                 market.inventory[item] = max(
                     0,
-                    market.inventory[item]
+                    current_inventory
                     - multiplier,
                 )
 
@@ -1736,9 +1741,14 @@ def consume_town_demand(
 
         for item in TOWN_CENTER_PRODUCTS:
 
+            current_inventory = market.inventory.get(
+                item,
+                0,
+            )
+
             market.inventory[item] = max(
                 0,
-                market.inventory[item]
+                current_inventory
                 - center_multiplier,
             )
 
