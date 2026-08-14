@@ -351,14 +351,15 @@ class TaskScheduler:
         x = state.me.farmer.x
         y = state.me.farmer.y
 
-        # Market-only tasks — farmer does nothing.
+        # Market-only tasks — farmer is FREE to do physical work simultaneously.
+        # Find the best physical task nearby instead of idling.
         if task.task_type in (
             TaskType.BUY_SEED,
             TaskType.BUY_ANIMAL,
             TaskType.HIRE,
             TaskType.BUY_LAND,
         ):
-            return ["PASS"]
+            return self._best_physical_action(state)
 
         if task.task_type == TaskType.PASS:
             return ["PASS"]
@@ -463,8 +464,96 @@ class TaskScheduler:
         return ["PASS"]
 
     # ========================================================
-    # HELPERS
+    # BEST PHYSICAL ACTION (farmer fallback for market turns)
     # ========================================================
+
+    def _best_physical_action(self, state) -> list:
+        """
+        When the farmer's primary task is market-only, find the closest
+        physical task and execute one step toward it (or execute it if
+        already on the tile). Priority: critical water > harvest > dig >
+        normal water > fertilize > plant > feed > care.
+
+        Returns a farmer action list.
+        """
+        x = state.me.farmer.x
+        y = state.me.farmer.y
+        tiles = state.me.tiles
+        # Scan all tiles — each priority is checked independently with its own
+        # score weight. The elif chain had a dead WATER normal branch.
+        candidates: list[tuple[float, str, int, int]] = []
+
+        for ty_i, row in enumerate(tiles):
+            for tx_i, tile in enumerate(row):
+                if not isinstance(tile, dict):
+                    continue
+
+                kind = tile.get("kind")
+                dist = abs(x - tx_i) + abs(y - ty_i)
+
+                if kind == "PLANT":
+                    unw = int(tile.get("consecutive_unwatered", 0))
+                    watered = tile.get("watered_today", False)
+                    yield_units = int(tile.get("yield_units", 0))
+
+                    # WATER critical — plant will die
+                    if not watered and unw >= 1:
+                        candidates.append((10000 - dist, "WATER", tx_i, ty_i))
+                    # HARVEST — ready to pick
+                    if yield_units > 0:
+                        candidates.append((8000 - dist, "HARVEST", tx_i, ty_i))
+                    # WATER normal — not yet critical but needs water today
+                    if not watered and unw == 0:
+                        candidates.append((6000 - dist, "WATER", tx_i, ty_i))
+
+                elif kind == "WEED":
+                    # DIG weed before it spreads
+                    candidates.append((7500 - dist, "DIG", tx_i, ty_i))
+
+                elif kind in ("COOP", "PASTURE"):
+                    animal = tile.get("animal")
+                    if animal:
+                        fed = tile.get("fed_today", False)
+                        if not fed:
+                            unf = int(tile.get("consecutive_unfed", 0))
+                            sc = (9000 if unf >= 1 else 5000) - dist
+                            candidates.append((sc, "FEED", tx_i, ty_i))
+                        # Harvest animal products if ready
+                        if int(tile.get("yield_units", 0)) > 0:
+                            candidates.append((8500 - dist, "HARVEST", tx_i, ty_i))
+                        # CARE if needed
+                        if tile.get("needs_care", False):
+                            candidates.append((4000 - dist, "CARE", tx_i, ty_i))
+                    # Collect fertilizer if available
+                    if tile.get("fertilizer_available", False):
+                        candidates.append((3500 - dist, "COLLECT_FERTILIZER", tx_i, ty_i))
+
+        if not candidates:
+            return ["PASS"]
+
+        best = max(candidates, key=lambda c: c[0])
+        action_str, tx, ty = best[1], best[2], best[3]
+
+        if (x, y) == (tx, ty):
+            return [action_str]
+
+        # Navigate via A*
+        start_pos = Position(x, y)
+        target_pos = Position(tx, ty)
+        path = self._pathfinder.find_path(state, start_pos, target_pos)
+        if path and len(path) > 1:
+            next_pos = path[1]
+            if next_pos.x > x:
+                return ["EAST"]
+            elif next_pos.x < x:
+                return ["WEST"]
+            elif next_pos.y > y:
+                return ["SOUTH"]
+            elif next_pos.y < y:
+                return ["NORTH"]
+
+        return self._move_toward(x, y, tx, ty)
+
 
     @staticmethod
     def _tile_at(

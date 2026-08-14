@@ -134,7 +134,7 @@ class ProductionSlotAllocator:
             "feed_cost_per_day": 25,
         },
         "COW": {
-            "cost": 400,
+            "cost": 600,   # was 400 — real cost from reference_rules.py ANIMALS
             "setup_action": "BUILD_PASTURE",
             "first_yield_day": 8,
             "yield_interval": 2,
@@ -405,7 +405,35 @@ class ProductionSlotAllocator:
         Rank all feasible candidates (crops AND animals) by
         contribution-per-tile-day so the agent always invests
         in the highest-ROI option available.
+
+        Includes market-saturation diversification:
+        A crop that already occupies ≥40% of active tiles is
+        penalized so the next slot goes to the second-best option.
+        MELON is capped at 25% — its small market (T=300) saturates fast.
         """
+
+        # Count active tiles per crop/animal for diversification
+        crop_counts: dict[str, int] = {}
+        total_active = 0
+        for row in state.me.tiles:
+            for tile in row:
+                if not isinstance(tile, dict):
+                    continue
+                if tile.get("kind") == "PLANT":
+                    c = tile.get("crop", "")
+                    if c:
+                        crop_counts[c] = crop_counts.get(c, 0) + 1
+                        total_active += 1
+                elif tile.get("kind") in ("COOP", "PASTURE"):
+                    a = tile.get("animal", "")
+                    if a:
+                        crop_counts[a] = crop_counts.get(a, 0) + 1
+                        total_active += 1
+
+        # Diversification caps — fraction of total active tiles
+        DIVERSITY_CAP = 0.40       # general crops capped at 40%
+        MELON_CAP = 0.25           # melon capped at 25% (small market T=300)
+        CAPS = {"MELON": MELON_CAP}
 
         results = []
 
@@ -421,9 +449,21 @@ class ProductionSlotAllocator:
                 if state.me.money >= self.ANIMAL_PROFILES[animal]["cost"]:
                     results.append(candidate)
 
+        def _diversity_score(item: SlotCandidate) -> float:
+            """Return contribution_per_tile_day with a diversity penalty."""
+            base = item.contribution_per_tile_day
+            if total_active == 0:
+                return base
+            cap = CAPS.get(item.crop, DIVERSITY_CAP)
+            frac = crop_counts.get(item.crop, 0) / max(1, total_active)
+            if frac >= cap:
+                # Penalize by 60% — still allows switch-back if it's massively better
+                return base * 0.40
+            return base
+
         results.sort(
             key=lambda item: (
-                item.contribution_per_tile_day,
+                _diversity_score(item),
                 item.contribution,
             ),
             reverse=True,

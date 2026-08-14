@@ -56,10 +56,11 @@ class StrategicTrajectoryPlanner:
         if state.step != self._last_step + 1:
             return True
 
-        # Unexpected large money change (±500 coins outside our market orders)
+        # Unexpected large money change (±2000 coins outside our market orders)
+        # Old threshold of 600 caused replanning on every sell, wasting compute.
         if self._last_money is not None:
             delta = abs(state.me.money - self._last_money)
-            if delta > 600:
+            if delta > 2000:
                 return True
 
         return False
@@ -74,7 +75,7 @@ class StrategicTrajectoryPlanner:
         opponent_model: OpponentModel,
     ) -> list[dict[str, Any]]:
         """Run beam search and return the full action sequence."""
-        return self.beam_search.plan(state)
+        return self.beam_search.plan(state, opponent_model=opponent_model)
 
     def _inject_market_orders(
         self,
@@ -151,6 +152,17 @@ class StrategicTrajectoryPlanner:
 
         # ---- Hard-constraint enforcement
         self.guard.enforce(state, next_action)
+
+        # ---- PASS-killer: farmer should NEVER idle when work exists.
+        # If the beam search returned PASS for the farmer, override with the
+        # best available physical action (water, harvest, dig, feed, etc.)
+        if next_action.get("farmer") in (["PASS"], None, []):
+            from estate_developer.planning.scheduler import TaskScheduler
+            _sched = TaskScheduler()
+            _physical = _sched._best_physical_action(state)
+            if _physical and _physical != ["PASS"]:
+                next_action = dict(next_action)
+                next_action["farmer"] = _physical
 
         # ---- Update tracking state
         self._last_step = state.step

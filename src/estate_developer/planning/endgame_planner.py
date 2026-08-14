@@ -68,18 +68,22 @@ class EndgamePlanner:
         remaining_tasks = allowed_tasks[1:]
         hand_actions = self.hand_solver.assign(state, remaining_tasks)
         
-        # 5. Market dumping
+        # 5. Market dumping — start dumping 1 full day (24 steps) before end
+        # to guarantee everything is sold. Was incorrectly set to 3.
         market_actions = []
-        
-        # In the final 3 ticks, or if shed is totally full, sell everything
         shed = state.private.shed
         shed_count = sum(v for v in shed.values() if isinstance(v, (int, float)))
-        
-        if remaining <= 3 or shed_count > 90:
+
+        if remaining <= 24 or shed_count > 90:
             for item, qty in shed.items():
-                if qty > 0:
-                    market_actions.append(["SELL", item, qty])
-        
+                if isinstance(qty, (int, float)) and qty > 0:
+                    market_actions.append(["SELL", item, int(qty)])
+            # Also sell everything in farmer inventory
+            for inv in (state.private.inventories or []):
+                for item, qty in inv.items():
+                    if isinstance(qty, (int, float)) and qty > 0:
+                        market_actions.append(["SELL", item, int(qty)])
+
         # Return as a single-step trajectory
         return [{
             "farmer": farmer_action,

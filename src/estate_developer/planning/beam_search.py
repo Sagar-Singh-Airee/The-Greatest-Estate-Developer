@@ -38,8 +38,8 @@ class BeamSearchPlanner:
 
     def __init__(
         self,
-        beam_width: int = 5,
-        max_depth: int = 3,
+        beam_width: int = 7,   # was 5 — wider search explores more task combos
+        max_depth: int = 5,    # was 3 — deeper plan = less frequent replanning
     ):
         self.beam_width = beam_width
         self.max_depth = max_depth
@@ -48,6 +48,11 @@ class BeamSearchPlanner:
         self.scheduler = TaskScheduler()
         self.hand_solver = HandAssignmentSolver()
         self.terminal_value = TerminalValueCalculator()
+
+        # Persistent MarketManager — shared across all calls so opponent context
+        # is not thrown away between beam search invocations.
+        from estate_developer.economics.market_manager import MarketManager
+        self.market_manager = MarketManager()
 
     # ============================================================
     # ACTION CANDIDATE GENERATION
@@ -69,11 +74,7 @@ class BeamSearchPlanner:
             TaskType,
         )
 
-        from estate_developer.economics.market_manager import (
-            MarketManager,
-        )
-
-        market_manager = MarketManager()
+        market_manager = self.market_manager  # reuse persistent instance
 
         tasks = self.generator.generate(
             state
@@ -267,6 +268,7 @@ class BeamSearchPlanner:
         self,
         initial_state: ObservationState,
         timeout: float = 1.8,
+        opponent_model=None,
     ) -> list[dict[str, Any]]:
         """
         Run forward-simulating Beam Search.
@@ -336,9 +338,11 @@ class BeamSearchPlanner:
 
                 candidates = (
                     self.generate_candidate_actions(
-                        current_state
+                        current_state,
+                        opponent_model=opponent_model,
                     )
                 )
+
 
                 for action in candidates:
 
