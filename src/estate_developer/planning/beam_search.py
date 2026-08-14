@@ -353,7 +353,8 @@ class BeamSearchPlanner:
                     )
 
                     if (
-                        next_score
+                        not best_overall[2]
+                        or next_score
                         > best_overall[0]
                     ):
                         best_overall = (
@@ -374,6 +375,11 @@ class BeamSearchPlanner:
                 key=lambda entry: entry[0],
                 reverse=True,
             )
+
+            # Once valid expansions exist, the best expansion
+            # is the best trajectory candidate for this depth.
+            # Never return the synthetic empty initial sequence.
+            best_overall = expansions[0]
 
             beam = expansions[
                 : self.beam_width
