@@ -1,83 +1,74 @@
-# The Greatest Estate Developer
+<div align="center">
+  <h1>🏆 The Greatest Estate Developer</h1>
+  <p><i>"Why would I work harder... when I can simply make the world work for me?"</i></p>
+</div>
 
-A brief description of the project.
-# 🏡 The-Greatest-Estate-Developer
+<br>
 
-> *"Why would I work harder... when I can simply make the world work for me?"*
+Welcome to **The Greatest Estate Developer**.
 
-Welcome to **The-Greatest-Estate-Developer**.
+This is not a traditional farming bot. 
 
-This is not a farming bot.
+This is a comprehensive, predictive economic engine built to dominate the **Kaggriculture** leaderboard—a 30-day, 720-turn economic battlefield where land, labor, crops, livestock, fertilizer, and dynamic pricing dictate survival.
 
-This is an attempt to build an agricultural empire inside **Kaggriculture**—a 30-day, 720-turn economic battlefield where land, labor, crops, livestock, fertilizer, supply, demand, and one unfortunate opponent are all pieces on the board.
-
-And naturally...
-
-**we intend to own the board.**
+And naturally... **we intend to own the board.**
 
 ---
 
-## 📜 The Premise
+## 🏛️ The Premise
 
-Two farmers.
+Two farmers. Two estates. One market. 720 turns.
+And only one question matters at the end: **Who has the most cash?**
 
-Two estates.
+Kaggriculture looks like a cozy farming simulation. **It isn't.** 
+Underneath the crops and livestock is a complex optimization problem involving:
 
-One market.
+- 🛣️ **Pathfinding & Labor Optimization** (Hungarian Algorithm)
+- 📉 **Dynamic Pricing & Market Drain** (Town Consumption Forecasting)
+- 🏗️ **Capital Investment & Expansion** (Hiring & Buying Land)
+- 🧠 **Opponent Modeling** (Staggered selling to avoid crashes)
+- 🔮 **Long-Horizon Planning** (Time-safe Forward Rollout Beam Search)
 
-720 turns.
+Every turn is a decision. Every decision has an opportunity cost. 
+Every harvest changes the market. Every expansion consumes capital.
 
-And only one question matters at the end:
-
-> **Who has more money?**
-
-Kaggriculture looks like a farming simulation.
-
-It isn't.
-
-Underneath the crops and livestock is a problem involving:
-
-- sequential decision making
-- resource allocation
-- scheduling
-- dynamic pricing
-- supply and demand
-- capital investment
-- labor optimization
-- partial information
-- opponent modeling
-- long-horizon planning
-
-Every turn is a decision.
-
-Every decision has an opportunity cost.
-
-Every harvest changes the market.
-
-Every expansion consumes capital.
-
-And every mistake can compound.
-
-So we will not build an agent that merely *plays the game*.
-
-We will build one that **understands the economy behind it.**
+So we did not build an agent that merely *plays the game*. 
+We built one that **understands the economy behind it.**
 
 ---
 
-# 🧠 The Philosophy
+## ⚙️ The Architecture (V10 Ultimate)
 
-A normal farmer asks:
+The agent operates using a layered, state-advancing architecture. Check out the full breakdown in **[STRUCTURE.md](./STRUCTURE.md)**.
 
-> "What should I plant?"
+### 🧠 Strategic Trajectory Planner
+The orchestrator. Evaluates the state and decides whether to run a deep future rollout, or execute the endgame liquidation policy.
 
-The Greatest Estate Developer asks:
+### 🔭 Beam Search & True Rollouts
+The agent doesn't guess. It uses a **Forward Rollout Beam Search** that perfectly clones the game environment. It plays out hundreds of simulated futures in memory, scores them using a rich **Terminal Value Calculator** (valuing cash, plants in the ground, and future animal yields), and picks the timeline that results in the highest wealth. Safe-guarded by a strict time limit to prevent Kaggle timeouts.
 
-> "What is the marginal value of this tile, this worker, this turn, this kilogram of wheat, and this dollar of capital—and what happens to the market if I use it?"
+### ⚔️ Opponent Intelligence
+The **Opponent Model** spies on the enemy's farm. It tracks their dominant crop and predicts their sell volume. Our **Market Manager** uses this intelligence to stagger our sell orders, ensuring we don't crash the market price alongside them.
 
-That distinction is the entire project.
+### 🚜 Global Optimal Execution
+When it's time to work, the **Task Generator** queues up everything that needs doing. Then, the **Hand Assignment Solver** uses the Hungarian algorithm to globally optimize the paths of all farm hands, guaranteeing the absolute minimum walking distance.
 
-We don't want:
+---
 
-```text
-if melon_is_good:
-    plant_melon()
+## 🚀 How to Submit to Kaggle
+
+Because the agent is complex and spread across a highly organized module, we provide a build script to package it for the Kaggle platform.
+
+1. Ensure your logic in `src/estate_developer` is complete.
+2. Run the build script:
+   ```bash
+   python kaggle/build_submission.py
+   ```
+3. A single file `submission.py` will be generated in the `kaggle/` folder.
+4. **Upload `kaggle/submission.py` to the Kaggle competition!** 
+
+---
+
+<div align="center">
+  <i>Every mistake compounds. Every efficiency compounds. Build the greatest estate.</i>
+</div>
