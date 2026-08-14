@@ -64,7 +64,7 @@ class TaskGenerator:
     FERTILIZE_PRIORITY = 870
     CARE_PRIORITY = 850
     WATER_NORMAL_PRIORITY = 800
-    PLACE_ANIMAL_PRIORITY = 780
+    PLACE_ANIMAL_PRIORITY = 1250
     COLLECT_FERTILIZER_PRIORITY = 750
     PLACE_PRIORITY = 700
     BUY_SEED_PRIORITY = 990
@@ -121,7 +121,9 @@ class TaskGenerator:
             1
             for row in state.me.tiles
             for tile in row
-            if isinstance(tile, dict) and tile.get("kind") in ("COOP", "PASTURE") and "animal" in tile
+            if isinstance(tile, dict)
+            and tile.get("kind") in ("COOP", "PASTURE")
+            and tile.get("animal")
         )
         # How many wheat tiles we must always keep growing.
         wheat_reserve = max(0, (animal_count + 3) // 4) * self.WHEAT_TILES_PER_4_ANIMALS
@@ -169,9 +171,72 @@ class TaskGenerator:
                 ):
                     continue
 
-                if tile.get(
-                    "kind"
-                ) != "PLANT":
+                kind = tile.get("kind")
+
+                # Animal work must be handled before the plant-only branch.
+                # Previously this lived under ``elif`` after a PLANT guard,
+                # making every feed/care/collection task unreachable.
+                if kind in ("COOP", "PASTURE"):
+                    animal = tile.get("animal")
+                    if not animal:
+                        continue
+
+                    if not tile.get("fed_today", False):
+                        unfed = int(tile.get("consecutive_unfed", 0))
+                        tasks.append(
+                            FarmTask(
+                                task_type=TaskType.FEED,
+                                priority=(
+                                    self.FEED_CRITICAL_PRIORITY
+                                    if unfed >= 1
+                                    else self.FEED_NORMAL_PRIORITY
+                                ),
+                                target=(x, y),
+                                reason=(
+                                    f"{animal} needs immediate feed"
+                                    if unfed >= 1
+                                    else f"feed {animal} for production"
+                                ),
+                            )
+                        )
+
+                    if not tile.get("cared_today", False):
+                        tasks.append(
+                            FarmTask(
+                                task_type=TaskType.CARE,
+                                priority=self.CARE_PRIORITY,
+                                target=(x, y),
+                                reason=f"care for {animal} to bank yield bonus",
+                            )
+                        )
+
+                    if int(tile.get("yield_units", 0)) > 0:
+                        tasks.append(
+                            FarmTask(
+                                task_type=TaskType.HARVEST,
+                                priority=self.HARVEST_PRIORITY,
+                                target=(x, y),
+                                crop=(
+                                    "EGG" if animal == "GOOSE"
+                                    else "MILK" if animal == "COW"
+                                    else "WOOL"
+                                ),
+                                reason=f"harvest {animal} products",
+                            )
+                        )
+
+                    if tile.get("fertilizer_available", False):
+                        tasks.append(
+                            FarmTask(
+                                task_type=TaskType.COLLECT_FERTILIZER,
+                                priority=self.COLLECT_FERTILIZER_PRIORITY,
+                                target=(x, y),
+                                reason=f"collect fertilizer from {animal}",
+                            )
+                        )
+                    continue
+
+                if kind != "PLANT":
                     continue
 
                 crop = tile.get(
@@ -253,67 +318,6 @@ class TaskGenerator:
                             reason=reason,
                         )
                     )
-                    
-                # ------------------------------------------------
-                # ANIMALS (COOP / PASTURE)
-                # ------------------------------------------------
-                elif tile.get("kind") in ("COOP", "PASTURE"):
-                    animal = tile.get("animal")
-                    if not animal:
-                        continue
-                        
-                    # 1. FEED
-                    if not tile.get("fed_today", False):
-                        unfed = int(tile.get("consecutive_unfed", 0))
-                        if unfed >= 1:
-                            priority = self.FEED_CRITICAL_PRIORITY
-                            reason = f"{animal} is starving and will escape"
-                        else:
-                            priority = self.FEED_NORMAL_PRIORITY
-                            reason = f"{animal} needs daily feed"
-                            
-                        tasks.append(
-                            FarmTask(
-                                task_type=TaskType.FEED,
-                                priority=priority,
-                                target=(x, y),
-                                reason=reason,
-                            )
-                        )
-                        
-                    # 2. CARE
-                    if not tile.get("cared_today", False):
-                        tasks.append(
-                            FarmTask(
-                                task_type=TaskType.CARE,
-                                priority=self.CARE_PRIORITY,
-                                target=(x, y),
-                                reason=f"care for {animal} to bank yield",
-                            )
-                        )
-                        
-                    # 3. HARVEST ANIMAL PRODUCTS
-                    yield_units = int(tile.get("yield_units", 0))
-                    if yield_units > 0:
-                        tasks.append(
-                            FarmTask(
-                                task_type=TaskType.HARVEST,
-                                priority=self.HARVEST_PRIORITY,
-                                target=(x, y),
-                                reason=f"harvest products from {animal}",
-                            )
-                        )
-                        
-                    # 4. COLLECT FERTILIZER
-                    if tile.get("fertilizer_available", False):
-                        tasks.append(
-                            FarmTask(
-                                task_type=TaskType.COLLECT_FERTILIZER,
-                                priority=self.COLLECT_FERTILIZER_PRIORITY,
-                                target=(x, y),
-                                reason=f"collect fertilizer from {animal}",
-                            )
-                        )
 
         # ----------------------------------------------------
         # 1b. PLACE animals from shed onto empty structures.
@@ -326,10 +330,12 @@ class TaskGenerator:
         }
 
         for animal_name, needed_structure in ANIMAL_STRUCTURE_MAP.items():
-            in_shed = int(
-                state.private.shed.get(animal_name, 0)
-            )
-            if in_shed <= 0:
+            available_to_farmer = int(state.private.shed.get(animal_name, 0))
+            if state.private.inventories:
+                available_to_farmer += int(
+                    state.private.inventories[0].get(animal_name, 0)
+                )
+            if available_to_farmer <= 0:
                 continue
 
             # Find an empty structure to place the animal on
@@ -417,24 +423,9 @@ class TaskGenerator:
             "EGG", "MILK", "WOOL", "FERTILIZER",
         ]
 
-        if getattr(state.private, "inventories", None):
-            # Generate one PLACE task for every carried item across all inventories.
-            # We set the target to the corner of the shed (4, 4) so that the HandAssignmentSolver
-            # has a coordinate for pathfinding. Without a target, HandAssignmentSolver ignores the task!
-            for inv_index, inventory in enumerate(state.private.inventories):
-                for item in ALL_SELLABLE:
-                    quantity = int(inventory.get(item, 0))
-                    if quantity > 0:
-                        tasks.append(
-                            FarmTask(
-                                task_type=TaskType.PLACE,
-                                priority=self.PLACE_PRIORITY,
-                                target=(4, 4),  # target required for HandAssignmentSolver!
-                                crop=item,
-                                quantity=quantity,
-                                reason=f"move harvested {item.lower()} to shed (inventory {inv_index})",
-                            )
-                        )
+        # Inventories are dropped into the shed automatically at day end.  Do
+        # not send arbitrary workers on generic PLACE tasks: a worker without
+        # that exact item would walk to the shed and perform a no-op.
 
         # ----------------------------------------------------
         # 3. Economic allocation of a FREE slot.
@@ -456,7 +447,6 @@ class TaskGenerator:
                 and candidate.crop != "WHEAT"
             ):
                 # Override with WHEAT to prevent starvation.
-                from estate_developer.economics.crops import CROP_PROFILES as _CP
                 # Manufacture a pseudo-candidate pointing at WHEAT.
                 from estate_developer.economics.slot_allocator import SlotCandidate as _SC
                 candidate = _SC(
@@ -510,24 +500,10 @@ class TaskGenerator:
                                 task_type=task_type,
                                 priority=self.BUILD_PRIORITY,
                                 target=target,
+                                crop=chosen,
                                 reason=(
                                     f"allocator: build {setup_action} "
                                     f"for {chosen}"
-                                ),
-                            )
-                        )
-
-                    # 2. Queue a properly-typed BUY_ANIMAL market order.
-                    if state.me.money >= animal_profile["cost"]:
-                        tasks.append(
-                            FarmTask(
-                                task_type=TaskType.BUY_ANIMAL,
-                                priority=self.BUY_SEED_PRIORITY,
-                                crop=chosen,
-                                quantity=1,
-                                reason=(
-                                    f"allocator: buy {chosen} "
-                                    "for investment"
                                 ),
                             )
                         )
@@ -572,38 +548,43 @@ class TaskGenerator:
                             )
                             _remaining_seeds -= 1
 
-                    # Otherwise bulk-buy enough seeds to fill ALL free slots at once.
-                    # This ensures we invest money immediately instead of buying 1 per turn.
+                    # Buy a small, portfolio-sized tranche. The old ten-seed
+                    # batch concentrated all capital in the crop that happened
+                    # to rank first before any of its exposure was visible.
                     else:
+                        profile = self._profile(crop)
+                        free_tiles = len(self._find_empty_production_tiles(state.me.tiles))
+                        unlock_count = len(state.me.unlocked_quadrants)
+                        next_land_cost = (1000, 2000, 4000)[
+                            min(max(0, unlock_count - 1), 2)
+                        ]
+                        # Preserve expansion capital only when land is about
+                        # to become the bottleneck; otherwise put idle cash to
+                        # work in crops.
+                        reserve = 250
+                        if free_tiles <= 6 and unlock_count < 4:
+                            reserve += next_land_cost
+                        investable_cash = max(0, int(state.me.money - reserve))
+                        affordable = investable_cash // max(1, profile.seed_cost)
+                        portfolio = self.allocator.crop_portfolio(
+                            state, min(free_tiles, 8)
+                        )
+                        desired = max(1, portfolio.count(crop))
+                        tranche = min(3, free_tiles, desired, affordable)
 
-                        if not self._shed_contains_candidate(
-                            state
-                        ):
-
-                            profile = self._profile(crop)
-
-                            if (
-                                state.me.money
-                                >= profile.seed_cost
-                            ):
-                                # Count how many free production tiles we have
-                                _free_tiles = len(self._find_empty_production_tiles(state.me.tiles))
-                                # Buy enough seeds to fill them all (capped by budget and market orders limit)
-                                _can_afford = max(1, int(state.me.money * 0.6 / max(1, profile.seed_cost)))
-                                _bulk_qty = max(1, min(_free_tiles, _can_afford, 10))
-
-                                tasks.append(
-                                    FarmTask(
-                                        task_type=TaskType.BUY_SEED,
-                                        priority=self.BUY_SEED_PRIORITY,
-                                        crop=crop,
-                                        quantity=_bulk_qty,
-                                        reason=(
-                                            f"economic allocator bulk-buying "
-                                            f"{_bulk_qty}x {crop}"
-                                        ),
-                                    )
+                        if tranche > 0:
+                            tasks.append(
+                                FarmTask(
+                                    task_type=TaskType.BUY_SEED,
+                                    priority=self.BUY_SEED_PRIORITY,
+                                    crop=crop,
+                                    quantity=tranche,
+                                    reason=(
+                                        f"diversified capital tranche: "
+                                        f"{tranche}x {crop}"
+                                    ),
                                 )
+                            )
 
         # ----------------------------------------------------
         # 4. Fallback
@@ -693,9 +674,37 @@ class TaskGenerator:
 
         valid_names = set(self.CANDIDATE_CROPS) | set(self.ANIMAL_NAMES)
 
+        # Plant seeds already paid for before opening another position. This
+        # also makes the small seed tranches form a real portfolio over time.
         for candidate in ranked:
-            if candidate.crop in valid_names:
+            if (
+                candidate.crop in self.CANDIDATE_CROPS
+                and state.private.seeds.get(candidate.crop, 0) > 0
+            ):
                 return candidate
+
+        animal_count = sum(
+            1
+            for row in state.me.tiles
+            for tile in row
+            if isinstance(tile, dict)
+            and tile.get("kind") in ("COOP", "PASTURE")
+            and tile.get("animal")
+        )
+        usable_tiles = sum(
+            1
+            for row in state.me.tiles
+            for tile in row
+            if tile != "LOCKED"
+        )
+        herd_cap = max(1, usable_tiles // 6)
+
+        for candidate in ranked:
+            if candidate.crop not in valid_names:
+                continue
+            if candidate.crop in self.ANIMAL_NAMES and animal_count >= herd_cap:
+                continue
+            return candidate
 
         return None
 

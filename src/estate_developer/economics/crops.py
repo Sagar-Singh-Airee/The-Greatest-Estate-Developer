@@ -49,6 +49,10 @@ class CropProfile:
 
     yield_type: str
 
+    # Ongoing crops add this many days between production ticks. One-time
+    # crops use 0. This keeps planning logic tied to one authoritative cadence.
+    yield_interval: int
+
 
 # ============================================================
 # DOCUMENTED CROP PROFILES
@@ -61,10 +65,13 @@ CROP_PROFILES: dict[str, CropProfile] = {
         seed_cost=10,
         first_yield_day=2,
         max_yield_day=4,
+        # The engine's held-yield cap is 6, but the non-fertilized watering
+        # window can bank four units; the sixth unit requires fertilizer.
         max_yield_unfertilized=4,
         max_yield_fertilized=6,
         base_price=25,
         yield_type="ONE_TIME",
+        yield_interval=0,
     ),
 
     "CARROT": CropProfile(
@@ -76,39 +83,45 @@ CROP_PROFILES: dict[str, CropProfile] = {
         max_yield_fertilized=4,
         base_price=35,
         yield_type="ONE_TIME",
+        yield_interval=0,
     ),
 
     "TOMATO": CropProfile(
         name="TOMATO",
         seed_cost=50,
         first_yield_day=8,
+        # Four daily output ticks complete on day 11.
         max_yield_day=11,
         max_yield_unfertilized=4,
         max_yield_fertilized=4,
         base_price=60,
         yield_type="ONGOING",
+        yield_interval=1,
     ),
 
     "STRAWBERRY": CropProfile(
         name="STRAWBERRY",
         seed_cost=100,
         first_yield_day=10,
+        # Four two-day output ticks complete on day 16.
         max_yield_day=16,
         max_yield_unfertilized=4,
         max_yield_fertilized=4,
         base_price=120,
         yield_type="ONGOING",
+        yield_interval=2,
     ),
 
     "MELON": CropProfile(
         name="MELON",
         seed_cost=80,
         first_yield_day=10,
-        max_yield_day=10,
+        max_yield_day=12,
         max_yield_unfertilized=6,
         max_yield_fertilized=6,
         base_price=250,
         yield_type="ONE_TIME",
+        yield_interval=0,
     ),
 }
 

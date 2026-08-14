@@ -175,6 +175,18 @@ class BeamSearchPlanner:
                     ]
                 )
 
+            elif (
+                tt in (TaskType.BUILD_COOP, TaskType.BUILD_PASTURE)
+                and selected_task.crop
+            ):
+                # A structure is built by the farmer before market orders are
+                # processed, so pairing the purchase here creates a complete
+                # build → pickup → place lifecycle rather than a stranded
+                # animal token or an empty structure.
+                market_orders.append(
+                    ["BUY_ANIMAL", selected_task.crop, 1]
+                )
+
             elif tt == TaskType.HIRE:
 
                 market_orders.append(

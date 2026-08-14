@@ -16,6 +16,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 import math
 
+from estate_developer.simulation.reference_rules import (
+    MARKET_I0,
+    MARKET_PARAMS as REFERENCE_MARKET_PARAMS,
+    market_price,
+)
+
 
 @dataclass(frozen=True)
 class MarketProfile:
@@ -29,56 +35,16 @@ class MarketProfile:
 
 
 MARKET_PROFILES = {
-
-    "WHEAT": MarketProfile(
-        base_price=25,
-        initial_inventory=10000,
-        throughput=400,
-        below_function="sqrt",
-        below_target=0.80,
-        above_function="log",
-        above_target=0.20,
-    ),
-
-    "CARROT": MarketProfile(
-        base_price=35,
-        initial_inventory=10000,
-        throughput=450,
-        below_function="log",
-        below_target=0.20,
-        above_function="sqrt",
-        above_target=0.70,
-    ),
-
-    "TOMATO": MarketProfile(
-        base_price=60,
-        initial_inventory=10000,
-        throughput=200,
-        below_function="linear",
-        below_target=0.40,
-        above_function="sqrt",
-        above_target=0.60,
-    ),
-
-    "STRAWBERRY": MarketProfile(
-        base_price=120,
-        initial_inventory=10000,
-        throughput=100,
-        below_function="sqrt",
-        below_target=0.70,
-        above_function="linear",
-        above_target=1.60,
-    ),
-
-    "MELON": MarketProfile(
-        base_price=250,
-        initial_inventory=10000,
-        throughput=300,
-        below_function="log",
-        below_target=0.20,
-        above_function="sq",
-        above_target=3.60,
-    ),
+    item: MarketProfile(
+        base_price=float(params["base"]),
+        initial_inventory=MARKET_I0,
+        throughput=float(params["T"]),
+        below_function=str(params["below_func"]),
+        below_target=float(params["below_target"]),
+        above_function=str(params["above_func"]),
+        above_target=float(params["above_target"]),
+    )
+    for item, params in REFERENCE_MARKET_PARAMS.items()
 }
 
 
@@ -128,59 +94,9 @@ def _price_at_inventory(
     inventory: float,
 ) -> float:
 
-    profile = MARKET_PROFILES[crop]
-
-    delta = inventory - profile.initial_inventory
-
-    if abs(delta) < 1e-12:
-        return profile.base_price
-
-    if delta < 0:
-
-        shape = _shape(
-            profile.below_function,
-            abs(delta) / profile.throughput,
-        )
-
-        amplitude = (
-            profile.below_target
-            * profile.base_price
-            / _shape(
-                profile.below_function,
-                1.0,
-            )
-        )
-
-        price = (
-            profile.base_price
-            + amplitude * shape
-        )
-
-    else:
-
-        shape = _shape(
-            profile.above_function,
-            delta / profile.throughput,
-        )
-
-        amplitude = (
-            profile.above_target
-            * profile.base_price
-            / _shape(
-                profile.above_function,
-                1.0,
-            )
-        )
-
-        price = (
-            profile.base_price
-            - amplitude * shape
-        )
-
-    return max(
-        1.0,
-        round(price),
-    )
+    # The former normalized-by-throughput approximation materially
+    # overvalued premium crops. Quote the exact environment curve instead.
+    return float(market_price(crop, int(inventory)))
 
 
 def simulate_sale(

@@ -1,204 +1,163 @@
 from __future__ import annotations
 
-from estate_developer.state.parser import ObservationState
 from estate_developer.economics.crops import CROP_PROFILES
-from estate_developer.economics.market_manager import MarketManager
-
-# Base prices for animal products (not in CROP_PROFILES)
-PRODUCT_BASE_PRICES: dict[str, int] = {
-    "EGG": 50,
-    "MILK": 160,
-    "WOOL": 200,
-    "FERTILIZER": 100,
-}
-
-# Animal yield intervals (days between yields)
-ANIMAL_YIELD_INTERVALS: dict[str, int] = {
-    "GOOSE": 1,
-    "COW": 2,
-    "SHEEP": 3,
-}
-
-SEASON_DAYS = 30
+from estate_developer.simulation.reference_rules import (
+    ANIMALS,
+    EPISODE_STEPS,
+    MARKET_PARAMS,
+    TURNS_PER_DAY,
+    market_price,
+)
+from estate_developer.state.parser import ObservationState
 
 
 class TerminalValueCalculator:
-    """
-    V11 Competitive Terminal Value.
+    """Estimate final score margin using only valid game mechanics.
 
-    The KEY CHANGE: the objective is now
-        Expected Score MARGIN = Our Final Cash - Opponent Final Cash
-
-    not simply "our asset estimate". Comparing our total estimated
-    wealth against the opponent's RAW cash alone (as V9 did) was
-    mathematically invalid.
-
-    We now estimate both players' final cash positions and return the
-    DIFFERENCE. Search will always prefer states where we have a
-    larger lead over the opponent at game end.
-
-    The algorithm:
-        1. Start from actual cash on hand (liquidated immediately).
-        2. Add shed inventory at REALIZED market price (dynamic, not base).
-        3. Add discounted future crop value derived from the simulator's
-           growth model (days remaining × yield rate) — NOT arbitrary 0.5.
-        4. Add discounted future animal value (days remaining / interval).
-        5. Subtract our estimated opponent final cash.
-        6. Return the margin as the objective.
+    The prior evaluator referenced fields that do not exist in ``CropProfile``.
+    As soon as an ongoing crop entered a rollout, scoring raised an exception
+    and the outer Kaggle wrapper fell back to ``PASS``. This version works
+    directly from the V11 crop/animal timing model and values the same market
+    price curve used by the simulator.
     """
 
-    _manager = MarketManager()
+    @staticmethod
+    def _days_remaining(state: ObservationState) -> int:
+        steps_left = max(0, EPISODE_STEPS - int(state.step))
+        return (steps_left + TURNS_PER_DAY - 1) // TURNS_PER_DAY
 
-    @classmethod
-    def _liquid_value(cls, items: dict[str, int], market: dict) -> float:
-        """Compute the sale value of an item dict at realized market prices."""
-        total = 0.0
-        for item, qty in items.items():
-            if qty <= 0:
-                continue
-            inv = market.get("inventory", {}).get(item, cls._manager.I0)
-            realized = market.get("prices", {}).get(
-                item, cls._manager.calculate_price(item, inv)
+    @staticmethod
+    def _price(state: ObservationState, item: str) -> float:
+        if item not in MARKET_PARAMS:
+            return 0.0
+        return float(
+            state.market.prices.get(
+                item,
+                market_price(item, state.market.inventory.get(item, 10_000)),
             )
-            total += float(realized) * qty
-        return total
+        )
 
     @classmethod
-    def _estimate_our_final_cash(
-        cls, state: ObservationState, days_remaining: int
+    def _liquid_value(
+        cls,
+        state: ObservationState,
+        items: dict[str, int],
     ) -> float:
-        """
-        Estimate our total final cash at end of season.
-        This is the unified quantity the search optimizes.
-        """
-        market_inv = state.market.inventory
-        market_prices = state.market.prices
-        market = {"inventory": market_inv, "prices": market_prices}
+        """Value only items that can actually be sold through the market."""
+        return sum(
+            max(0, int(quantity)) * cls._price(state, item)
+            for item, quantity in items.items()
+            if item in MARKET_PARAMS and item != "FERTILIZER"
+        )
 
-        value = float(state.me.money)
+    @classmethod
+    def _plant_value(
+        cls,
+        state: ObservationState,
+        tile: dict,
+        days_remaining: int,
+    ) -> float:
+        crop = str(tile.get("crop", ""))
+        profile = CROP_PROFILES.get(crop)
+        if profile is None:
+            return 0.0
 
-        # 1. Shed inventory at realized market price
-        value += cls._liquid_value(state.private.shed, market)
+        price = cls._price(state, crop)
+        held = max(0, int(tile.get("yield_units", 0)))
+        planted_day = int(tile.get("planted_day", state.day))
+        age = max(0, int(state.day) - planted_day)
 
-        # 2. Farmer inventory (will be placed to shed, then sold)
-        for inv in state.private.inventories:
-            value += cls._liquid_value(inv, market)
+        if profile.yield_type == "ONE_TIME":
+            if held > 0:
+                return held * price
+            days_to_first = max(0, profile.first_yield_day - age)
+            if days_remaining < days_to_first:
+                return 0.0
+            return profile.max_yield_unfertilized * price * 0.75
 
-        # 3. Crops in ground — future harvest value
-        for row in state.me.tiles:
+        # Ongoing crops have a fixed number of production ticks (their held
+        # yield cap) in the reference engine. Estimate only reachable ticks.
+        days_to_first = max(0, profile.first_yield_day - age)
+        if days_remaining < days_to_first:
+            future_ticks = 0
+        else:
+            future_ticks = 1 + (
+                (days_remaining - days_to_first) // profile.yield_interval
+            )
+        remaining_capacity = max(0, profile.max_yield_unfertilized - held)
+        future_units = min(remaining_capacity, future_ticks)
+        return (held + future_units * 0.75) * price
+
+    @classmethod
+    def _animal_value(
+        cls,
+        state: ObservationState,
+        tile: dict,
+        days_remaining: int,
+        *,
+        ours: bool,
+    ) -> float:
+        animal = str(tile.get("animal", ""))
+        data = ANIMALS.get(animal)
+        if data is None:
+            return 0.0
+
+        product = str(data["product"])
+        price = cls._price(state, product)
+        held = max(0, int(tile.get("yield_units", 0)))
+        placed_day = int(tile.get("placed_day", state.day))
+        age = max(0, int(state.day) - placed_day)
+        days_to_first = max(0, int(data["first_yield_day"]) - age)
+        interval = max(1, int(data["interval"]))
+        future_yields = (
+            0
+            if days_remaining < days_to_first
+            else 1 + (days_remaining - days_to_first) // interval
+        )
+
+        # Animals require feeding, care, collection, and sale. Discount future
+        # output instead of treating them as a cost-free perpetual machine.
+        execution_factor = 0.62 if ours else 0.55
+        return (held + future_yields * execution_factor) * price
+
+    @classmethod
+    def _farm_future_value(
+        cls,
+        state: ObservationState,
+        tiles: list[list[object]],
+        days_remaining: int,
+        *,
+        ours: bool,
+    ) -> float:
+        value = 0.0
+        for row in tiles:
             for tile in row:
                 if not isinstance(tile, dict):
                     continue
                 if tile.get("kind") == "PLANT":
-                    crop = tile.get("crop", "")
-                    profile = CROP_PROFILES.get(crop)
-                    if not profile:
-                        continue
-
-                    yield_units = int(tile.get("yield_units", 0))
-                    price = float(
-                        market_prices.get(crop, profile.base_price)
-                    )
-                    age = int(tile.get("age", 0))
-
-                    if profile.yield_type == "ONE_TIME":
-                        if yield_units > 0:
-                            value += yield_units * price
-                        elif days_remaining >= max(0, profile.time_to_first_yield - age):
-                            # Will ripen before end: count at 80% (watering risk)
-                            value += profile.max_yield_unfertilized * price * 0.80
-                        # else: won't ripen, worthless
-                    else:
-                        # Ongoing: current yield + estimate remaining harvests
-                        value += yield_units * price
-                        interval = max(1, profile.time_to_max_yield - profile.time_to_first_yield)
-                        future_harvests = max(0, days_remaining // interval)
-                        # 70% discount for execution (water, harvest, sell) risk
-                        value += future_harvests * profile.max_yield_unfertilized * price * 0.70
-
-                # 4. Animals in production
+                    value += cls._plant_value(state, tile, days_remaining)
                 elif tile.get("kind") in ("COOP", "PASTURE"):
-                    animal = tile.get("animal")
-                    if not animal:
-                        continue
-                    yield_units = int(tile.get("yield_units", 0))
-                    product = (
-                        "EGG" if animal == "GOOSE"
-                        else ("MILK" if animal == "COW" else "WOOL")
+                    value += cls._animal_value(
+                        state, tile, days_remaining, ours=ours
                     )
-                    price = float(
-                        market_prices.get(product, PRODUCT_BASE_PRICES.get(product, 50))
-                    )
-                    value += yield_units * price
-                    interval = max(1, ANIMAL_YIELD_INTERVALS.get(animal, 1))
-                    future_yields = max(0, days_remaining // interval)
-                    # 65% discount for feeding, care, harvest, sell risk chain
-                    value += future_yields * price * 0.65
-
-        return value
-
-    @classmethod
-    def _estimate_opponent_final_cash(
-        cls, state: ObservationState, days_remaining: int
-    ) -> float:
-        """
-        Estimate the opponent's final cash from their public state.
-        We can see their tiles and money but NOT their private shed/seeds.
-        We therefore sum their cash + publicly visible crop values.
-        """
-        market_prices = state.market.prices
-        value = float(state.opponent.money)
-
-        for row in state.opponent.tiles:
-            for tile in row:
-                if not isinstance(tile, dict):
-                    continue
-                if tile.get("kind") == "PLANT":
-                    crop = tile.get("crop", "")
-                    profile = CROP_PROFILES.get(crop)
-                    if not profile:
-                        continue
-                    age = int(tile.get("age", 0))
-                    price = float(market_prices.get(crop, profile.base_price))
-                    if profile.yield_type == "ONE_TIME":
-                        time_left = max(0, profile.time_to_first_yield - age)
-                        if days_remaining >= time_left:
-                            value += profile.max_yield_unfertilized * price * 0.80
-                    else:
-                        interval = max(1, profile.time_to_max_yield - profile.time_to_first_yield)
-                        future_harvests = max(0, days_remaining // interval)
-                        value += future_harvests * profile.max_yield_unfertilized * price * 0.70
-                elif tile.get("kind") in ("COOP", "PASTURE"):
-                    animal = tile.get("animal")
-                    if animal:
-                        product = (
-                            "EGG" if animal == "GOOSE"
-                            else ("MILK" if animal == "COW" else "WOOL")
-                        )
-                        price = float(
-                            market_prices.get(product, PRODUCT_BASE_PRICES.get(product, 50))
-                        )
-                        interval = max(1, ANIMAL_YIELD_INTERVALS.get(animal, 1))
-                        future_yields = max(0, days_remaining // interval)
-                        value += future_yields * price * 0.65
-
         return value
 
     @classmethod
     def calculate(cls, state: ObservationState) -> float:
-        """
-        Return the expected score MARGIN (our final cash - their final cash).
-        Beam search maximizes this, ensuring we always prefer winning trajectories.
-        """
-        days_remaining = max(0, SEASON_DAYS - int(state.day))
+        """Return estimated final cash margin: our score minus theirs."""
+        days_remaining = cls._days_remaining(state)
 
-        our_final = cls._estimate_our_final_cash(state, days_remaining)
-        their_final = cls._estimate_opponent_final_cash(state, days_remaining)
+        ours = float(state.me.money)
+        ours += cls._liquid_value(state, state.private.shed)
+        for inventory in state.private.inventories:
+            ours += cls._liquid_value(state, inventory)
+        ours += cls._farm_future_value(
+            state, state.me.tiles, days_remaining, ours=True
+        )
 
-        margin = our_final - their_final
+        opponent = float(state.opponent.money)
+        opponent += cls._farm_future_value(
+            state, state.opponent.tiles, days_remaining, ours=False
+        )
 
-        # Gentle P(win) bonus: being ahead generates compounding value
-        if margin > 0:
-            margin += min(margin * 0.03, 500.0)
-
-        return margin
+        return ours - opponent

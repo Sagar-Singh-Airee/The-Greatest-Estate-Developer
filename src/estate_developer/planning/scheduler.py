@@ -45,6 +45,8 @@ class TaskScheduler:
         (5, 5),
     )
 
+    ANIMALS = frozenset(("GOOSE", "COW", "SHEEP"))
+
     def __init__(self) -> None:
         self._pathfinder = Pathfinder()
 
@@ -364,16 +366,37 @@ class TaskScheduler:
         if task.task_type == TaskType.PASS:
             return ["PASS"]
 
+        # Feed and fertilizer are not abstract actions: the acting farmer
+        # must first carry the resource out of the shed.  Without this bridge,
+        # animals were repeatedly sent a FEED command that could never work.
+        if task.task_type == TaskType.FEED:
+            supply_action = self._pickup_if_needed(state, "WHEAT", 1)
+            if supply_action is not None:
+                return supply_action
+
+        if task.task_type == TaskType.FERTILIZE:
+            supply_action = self._pickup_if_needed(state, "FERTILIZER", 1)
+            if supply_action is not None:
+                return supply_action
+
         # ----------------------------------------------------
         # PLACE
         # ----------------------------------------------------
 
         if task.task_type == TaskType.PLACE:
+            is_animal_placement = task.crop in self.ANIMALS
 
-            target = self._nearest_shed_tile(
-                x,
-                y,
-            )
+            if is_animal_placement:
+                supply_action = self._pickup_if_needed(
+                    state, task.crop or "", 1
+                )
+                if supply_action is not None:
+                    return supply_action
+                target = task.target
+                if target is None:
+                    return ["PASS"]
+            else:
+                target = self._nearest_shed_tile(x, y)
 
             if (x, y) != target:
                 # Use A* for shed navigation too
@@ -463,6 +486,59 @@ class TaskScheduler:
 
         return ["PASS"]
 
+    def _pickup_if_needed(
+        self,
+        state,
+        item: str,
+        quantity: int,
+    ) -> list[str] | None:
+        """Return a movement/PICKUP action until the farmer carries ``item``.
+
+        ``None`` means the farmer already has the item and can continue with
+        the originally selected field task.
+        """
+        inventory = (
+            state.private.inventories[0]
+            if state.private.inventories
+            else {}
+        )
+        held = int(inventory.get(item, 0))
+        if held >= quantity:
+            return None
+
+        available = int(state.private.shed.get(item, 0))
+        if available <= 0:
+            return ["PASS"]
+
+        x = state.me.farmer.x
+        y = state.me.farmer.y
+        target = self._nearest_shed_tile(x, y)
+        if (x, y) != target:
+            return self._move_to_target(state, target)
+
+        return ["PICKUP", item, min(quantity - held, available)]
+
+    def _move_to_target(self, state, target: tuple[int, int]) -> list[str]:
+        """Take one valid A* step toward a target, with a greedy fallback."""
+        x = state.me.farmer.x
+        y = state.me.farmer.y
+        path = self._pathfinder.find_path(
+            state,
+            Position(x, y),
+            Position(target[0], target[1]),
+        )
+        if path and len(path) > 1:
+            next_pos = path[1]
+            if next_pos.x > x:
+                return ["EAST"]
+            if next_pos.x < x:
+                return ["WEST"]
+            if next_pos.y > y:
+                return ["SOUTH"]
+            if next_pos.y < y:
+                return ["NORTH"]
+        return self._move_toward(x, y, target[0], target[1])
+
     # ========================================================
     # BEST PHYSICAL ACTION (farmer fallback for market turns)
     # ========================================================
@@ -521,8 +597,9 @@ class TaskScheduler:
                         # Harvest animal products if ready
                         if int(tile.get("yield_units", 0)) > 0:
                             candidates.append((8500 - dist, "HARVEST", tx_i, ty_i))
-                        # CARE if needed
-                        if tile.get("needs_care", False):
+                        # CARE once each day. The live state exposes
+                        # ``cared_today``; ``needs_care`` is not a game field.
+                        if not tile.get("cared_today", False):
                             candidates.append((4000 - dist, "CARE", tx_i, ty_i))
                     # Collect fertilizer if available
                     if tile.get("fertilizer_available", False):

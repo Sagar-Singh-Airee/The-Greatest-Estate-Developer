@@ -45,7 +45,10 @@ class EndgamePlanner:
         
         # 2. Filter out investments
         # We don't want to start anything new if we can't harvest it
-        banned_types = {"PLANT", "BUY_SEED", "BUILD_COOP", "BUILD_PASTURE", "FERTILIZE"}
+        banned_types = {
+            "PLANT", "BUY_SEED", "BUY_ANIMAL", "HIRE", "BUY_LAND",
+            "BUILD_COOP", "BUILD_PASTURE", "FERTILIZE",
+        }
         
         # If very close to end, also stop caring/feeding as it won't yield
         if remaining <= 10:
@@ -76,13 +79,13 @@ class EndgamePlanner:
 
         if remaining <= 24 or shed_count > 90:
             for item, qty in shed.items():
-                if isinstance(qty, (int, float)) and qty > 0:
+                if (
+                    item in state.market.inventory
+                    and item != "FERTILIZER"
+                    and isinstance(qty, (int, float))
+                    and qty > 0
+                ):
                     market_actions.append(["SELL", item, int(qty)])
-            # Also sell everything in farmer inventory
-            for inv in (state.private.inventories or []):
-                for item, qty in inv.items():
-                    if isinstance(qty, (int, float)) and qty > 0:
-                        market_actions.append(["SELL", item, int(qty)])
 
         # Return as a single-step trajectory
         return [{

@@ -17,8 +17,8 @@ class TestSimulator(unittest.TestCase):
             farms=(
                 FarmState(
                     money=100.0,
-                    tiles=[[{"kind": "SOIL"} for _ in range(3)] for _ in range(3)],
-                    farmer=Position(0, 0),
+                    tiles=[[None for _ in range(3)] for _ in range(3)],
+                    farmer=Position(1, 1),
                     hands=(Position(2, 2),),
                     unlocked_quadrants=("Q1",),
                     hires_today=0
@@ -38,7 +38,7 @@ class TestSimulator(unittest.TestCase):
                 inventories=({},)
             ),
             market=MarketState(
-                inventory={},
+                inventory={"WHEAT": 10000},
                 prices={"WHEAT": 25}
             ),
             town=TownState(unlocked_shops=())
@@ -59,7 +59,7 @@ class TestSimulator(unittest.TestCase):
     def test_plant_seed_reduces_inventory_and_changes_tile(self):
         sim = Simulator(self.initial_state)
         sim.step({
-            "farmer": ["PLANT", "WHEAT", 1, 1],
+            "farmer": ["PLANT", "WHEAT"],
             "hands": [["PASS"]],
             "market": []
         })
@@ -75,17 +75,18 @@ class TestSimulator(unittest.TestCase):
         self.initial_state.me.tiles[1][1] = {
             "kind": "PLANT",
             "crop": "WHEAT",
-            "yield_units": 4
+            "yield_units": 4,
+            "planted_day": -2,
         }
         sim = Simulator(self.initial_state)
         sim.step({
-            "farmer": ["HARVEST", 1, 1],
+            "farmer": ["HARVEST"],
             "hands": [["PASS"]],
             "market": []
         })
         
         state = sim.state
-        self.assertEqual(state.me.tiles[1][1]["kind"], "SOIL")
+        self.assertIsNone(state.me.tiles[1][1])
         self.assertEqual(state.private.inventories[0].get("WHEAT", 0), 4)
 
     def test_sell_crop_adds_money_and_reduces_shed(self):
@@ -98,7 +99,9 @@ class TestSimulator(unittest.TestCase):
         })
         
         state = sim.state
-        self.assertEqual(state.me.money, 200.0) # 100 + 4*25
+        # Market orders settle one unit at a time; the first sale is $25 and
+        # later units are quoted after inventory has increased.
+        self.assertEqual(state.me.money, 197.0)
         self.assertEqual(state.private.shed["WHEAT"], 0)
 
 if __name__ == '__main__':

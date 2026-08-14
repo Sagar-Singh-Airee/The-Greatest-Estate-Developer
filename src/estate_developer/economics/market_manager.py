@@ -1,6 +1,12 @@
 from __future__ import annotations
 import math
 from typing import Any, TYPE_CHECKING
+
+from estate_developer.simulation.reference_rules import (
+    MARKET_I0,
+    MARKET_PARAMS as REFERENCE_MARKET_PARAMS,
+    market_price,
+)
 from estate_developer.economics.town_forecaster import TownDemandForecaster
 if TYPE_CHECKING:
     from estate_developer.state.parser import ObservationState
@@ -12,7 +18,7 @@ class MarketManager:
     Integrates town demand forecasting, opponent pressure, and arbitrage.
     """
     
-    I0 = 10000
+    I0 = MARKET_I0
 
     # Max units to buy per arbitrage opportunity per step.
     MAX_ARBITRAGE_BUY = 10
@@ -23,17 +29,7 @@ class MarketManager:
     # Max fraction of current cash to spend on arbitrage in one step.
     ARBITRAGE_CASH_FRACTION = 0.25
     
-    MARKET_PARAMS = {
-        "WHEAT": {"base": 25, "T": 400, "below_func": "sqrt", "below_target": 0.8, "above_func": "log", "above_target": 0.2},
-        "CARROT": {"base": 35, "T": 450, "below_func": "log", "below_target": 0.2, "above_func": "sqrt", "above_target": 0.7},
-        "TOMATO": {"base": 60, "T": 200, "below_func": "linear", "below_target": 0.4, "above_func": "sqrt", "above_target": 0.6},
-        "STRAWBERRY": {"base": 120, "T": 100, "below_func": "sqrt", "below_target": 0.7, "above_func": "linear", "above_target": 1.6},
-        "MELON": {"base": 250, "T": 300, "below_func": "log", "below_target": 0.2, "above_func": "sq", "above_target": 3.6},
-        "EGG": {"base": 50, "T": 332, "below_func": "linear", "below_target": 0.4, "above_func": "log", "above_target": 0.2},
-        "MILK": {"base": 160, "T": 122, "below_func": "sqrt", "below_target": 0.6, "above_func": "linear", "above_target": 1.6},
-        "WOOL": {"base": 200, "T": 105, "below_func": "log", "below_target": 0.2, "above_func": "sq", "above_target": 3.2},
-        "FERTILIZER": {"base": 100, "T": 200, "below_func": "linear", "below_target": 0.4, "above_func": "linear", "above_target": 0.4},
-    }
+    MARKET_PARAMS = REFERENCE_MARKET_PARAMS
 
     def _evaluate_func(self, func_name: str, x: float) -> float:
         if func_name == "linear":
@@ -85,7 +81,7 @@ class MarketManager:
             for tile in row
             if isinstance(tile, dict)
             and tile.get("kind") in ("COOP", "PASTURE")
-            and "animal" in tile
+            and tile.get("animal")
         )
         if animal_count > 0:
             shed_wheat = int(state.private.shed.get("WHEAT", 0))
@@ -121,7 +117,11 @@ class MarketManager:
 
             # Predict price 2 days out as shops drain supply
             predicted_price = forecaster.predict_price(
-                product, current_inv, days_ahead=2, unlocked_shops=list(unlocked_shops)
+                product,
+                current_inv,
+                days_ahead=2,
+                unlocked_shops=unlocked_shops,
+                current_day=int(state.day),
             )
 
             # Check minimum profit threshold
@@ -154,113 +154,84 @@ class MarketManager:
     def calculate_price(self, resource: str, inventory: int) -> int:
         if resource not in self.MARKET_PARAMS:
             return 1
-            
-        params = self.MARKET_PARAMS[resource]
-        base = params["base"]
-        T = params["T"]
-        
-        if inventory == self.I0:
-            return base
-            
-        diff = abs(inventory - self.I0)
-        
-        if inventory < self.I0:
-            sign = 1
-            func = params["below_func"]
-            target = params["below_target"]
-        else:
-            sign = -1
-            func = params["above_func"]
-            target = params["above_target"]
-            
-        amp = (target * base) / self._evaluate_func(func, T)
-        
-        price = base + sign * amp * self._evaluate_func(func, diff)
-        
-        return max(1, round(price))
+        return market_price(resource, int(inventory))
 
     def get_optimal_sell_orders(
         self,
         state: "ObservationState",
         opponent_model: "OpponentModel | None" = None,
     ) -> list[list[Any]]:
+        """Sell liquid inventory while protecting operating inputs.
+
+        There is no signal that an opponent will sell *this turn*, so crop
+        dominance is not a valid reason to sacrifice our own price.  Likewise,
+        the previous 9,500-inventory spike rule could hold MELON or WOOL for
+        longer than the whole season.  We make only short, rule-based holds.
         """
-        Determines which items in the shed should be sold right now.
-        Uses town demand forecasting to hold when prices are rising,
-        and stagers selling when the opponent is likely selling the same crop.
-        """
-        orders = []
+        orders: list[list[Any]] = []
         shed = state.private.shed
         market_inv = state.market.inventory
         market_prices = state.market.prices
-        unlocked_shops = getattr(
-            getattr(state, "town", None), "unlocked_shops", []
-        ) or []
-
+        unlocked_shops = state.town.unlocked_shops
         forecaster = TownDemandForecaster(market_manager=self)
 
-        # Opponent dominant crop for stagger logic
-        opp_dominant = None
-        if opponent_model is not None:
-            opp_dominant = opponent_model.dominant_crop()
-
-        # Products that benefit enormously from supply-bombing:
-        # WOOL uses sq price curve (price explodes when inventory < I0)
-        # MELON uses sq curve on above side with high above_target
-        # Hold these until town shops drain market below spike threshold.
-        SPIKE_HOLD_PRODUCTS = {"WOOL", "MELON"}
-        SPIKE_THRESHOLD = 9500  # hold until market inventory < this
-
-        shed_count = sum(v for v in shed.values() if isinstance(v, (int, float)))
-        needs_space = shed_count >= 70  # was 80; tighter to avoid gridlock
+        shed_count = sum(
+            value for value in shed.values()
+            if isinstance(value, (int, float))
+        )
+        needs_space = shed_count >= 85
+        days_remaining = max(0, 30 - int(state.day))
+        animal_count = sum(
+            1
+            for row in state.me.tiles
+            for tile in row
+            if isinstance(tile, dict)
+            and tile.get("kind") in ("COOP", "PASTURE")
+            and tile.get("animal")
+        )
 
         for resource, quantity in shed.items():
-            if not isinstance(quantity, (int, float)) or quantity <= 0:
+            if (
+                resource not in self.MARKET_PARAMS
+                or resource == "FERTILIZER"
+                or not isinstance(quantity, (int, float))
+                or quantity <= 0
+            ):
+                continue
+
+            sell_qty = int(quantity)
+            if resource == "WHEAT" and animal_count:
+                # Three days of feed buys time for the pickup-and-care loop.
+                sell_qty = max(0, sell_qty - animal_count * 3)
+            if sell_qty <= 0:
                 continue
 
             current_inv = int(market_inv.get(resource, self.I0))
-            current_price = float(market_prices.get(resource, self.calculate_price(resource, current_inv)))
-            base_price = self.MARKET_PARAMS.get(resource, {}).get("base", 0)
+            current_price = float(
+                market_prices.get(
+                    resource, self.calculate_price(resource, current_inv)
+                )
+            )
+            base_price = float(self.MARKET_PARAMS[resource]["base"])
 
-            # --- Hard override: shed full, sell everything immediately ---
             if needs_space:
-                orders.append(["SELL", resource, int(quantity)])
-                continue
-
-            # --- Predatory Front-Running ---
-            # If the opponent is about to sell the same crop, dump everything NOW
-            # to crash the price for them, overriding any hold logic.
-            is_opp_dominant = (opp_dominant == resource)
-            sell_qty = int(quantity)
-            
-            if is_opp_dominant:
                 orders.append(["SELL", resource, sell_qty])
                 continue
 
-            # --- Supply Bombing: hold WOOL/MELON until inventory drains ---
-            if resource in SPIKE_HOLD_PRODUCTS:
-                if current_inv >= SPIKE_THRESHOLD:
-                    # Market still flooded, hold and let shops drain it
-                    continue
-                # Market has drained below threshold — DUMP everything for spike price
-                orders.append(["SELL", resource, sell_qty])
-                continue
-
-            # --- Hold logic: will price rise significantly in 3 days? ---
             should_hold = forecaster.should_hold(
                 resource,
                 current_inv,
                 current_price,
                 unlocked_shops,
-                days_ahead=3,
-                hold_threshold=1.15,
+                days_ahead=min(2, days_remaining),
+                hold_threshold=1.06,
+                current_day=int(state.day),
             )
-
-            if should_hold:
+            if should_hold and days_remaining > 2:
                 continue
 
-            # Sell if price is near or above base
-            if current_price >= base_price * 0.9:
+            # Recycle working capital unless price is deeply distressed.
+            if current_price >= base_price * 0.75 or days_remaining <= 2:
                 orders.append(["SELL", resource, sell_qty])
 
         return orders

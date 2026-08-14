@@ -1,90 +1,103 @@
 from __future__ import annotations
 
 from typing import Any
+
+from estate_developer.simulation.reference_rules import (
+    ANIMALS,
+    CROPS,
+    FARM_HAND_COST_MULT,
+    LAND_PRICES,
+)
 from estate_developer.state.parser import ObservationState
 
-# Real seed costs pulled directly from CROP_PROFILES (authoritative source).
-# These MUST match reference_rules.py CROPS dict.
-_SEED_COSTS: dict[str, float] = {
-    "WHEAT": 10,
-    "CARROT": 20,
-    "TOMATO": 50,
-    "STRAWBERRY": 100,
-    "MELON": 80,   # seed=80, base_price=250 (don't confuse seed cost with market price!)
-}
 
-# Real animal costs from reference_rules.py ANIMALS dict.
-_ANIMAL_COSTS: dict[str, float] = {
-    "GOOSE": 300,
-    "COW": 600,    # was wrong at 400; reference_rules says 600
-    "SHEEP": 500,
-}
+def _hire_cost(hires_today: int) -> int:
+    a, b = 1, 1
+    for _ in range(max(0, hires_today)):
+        a, b = b, a + b
+    return FARM_HAND_COST_MULT * a
+
 
 class PolicyGuard:
-    """
-    Enforces hard safety invariants (e.g., never spend protected reserves,
-    never plant impossible crops).
-    Uses real seed/animal/land costs to correctly guard against overspending.
-    """
+    """Validate an action queue against the actual market execution order."""
 
     def enforce(self, state: ObservationState, actions: dict[str, Any]) -> None:
-        """
-        Modifies the actions in-place to ensure they do not violate invariants.
-        """
-        market_actions = actions.get("market", [])
-        safe_market = []
-
-        # Track projected cash through the order sequence
+        safe_market: list[list[Any]] = []
         projected_cash = float(state.me.money)
+        projected_hires = int(state.me.hires_today)
+        next_land = max(0, len(state.me.unlocked_quadrants) - 1)
 
-        for m_act in market_actions:
-            if not m_act:
+        for raw_order in actions.get("market", []):
+            if not isinstance(raw_order, list) or not raw_order:
+                continue
+            order = list(raw_order)
+            op = order[0]
+
+            # Sells are deliberately placed before investments.  Add a modest
+            # discount for price impact, which still lets realized proceeds
+            # fund a seed/land purchase in the same market phase.
+            if op == "SELL":
+                if len(order) < 3:
+                    continue
+                item = str(order[1])
+                if item == "FERTILIZER" or item not in state.market.inventory:
+                    continue
+                quantity = max(0, min(int(order[2]), state.private.shed.get(item, 0)))
+                if quantity <= 0:
+                    continue
+                unit_price = float(state.market.prices.get(item, 1))
+                projected_cash += quantity * max(1.0, unit_price * 0.90)
+                safe_market.append(["SELL", item, quantity])
                 continue
 
-            action_type = m_act[0]
+            if op == "BUY_SEED":
+                if len(order) < 3 or str(order[1]) not in CROPS:
+                    continue
+                crop = str(order[1])
+                cost = int(CROPS[crop]["seed"])
+                quantity = min(max(0, int(order[2])), int(projected_cash // cost))
+                if quantity > 0:
+                    safe_market.append(["BUY_SEED", crop, quantity])
+                    projected_cash -= quantity * cost
+                continue
 
-            if action_type == "BUY_SEED":
-                crop = m_act[1] if len(m_act) > 1 else ""
-                qty = int(m_act[2]) if len(m_act) > 2 else 1
-                unit_cost = _SEED_COSTS.get(crop, 100)
-                # Buy as many as we can afford, minimum 1
-                if projected_cash >= unit_cost:
-                    affordable_qty = max(1, min(qty, int(projected_cash // unit_cost)))
-                    safe_market.append([action_type, crop, affordable_qty])
-                    projected_cash -= affordable_qty * unit_cost
-                # else: truly can't afford even 1 — skip
+            if op == "BUY_PRODUCT":
+                if len(order) < 3 or str(order[1]) not in state.market.inventory:
+                    continue
+                item = str(order[1])
+                cost = max(1, int(state.market.prices.get(item, 1)))
+                quantity = min(max(0, int(order[2])), int(projected_cash // cost))
+                if quantity > 0:
+                    safe_market.append(["BUY_PRODUCT", item, quantity])
+                    projected_cash -= quantity * cost
+                continue
 
-            elif action_type == "BUY_PRODUCT":
-                # Arbitrage buy — verify we can afford it
-                product = m_act[1] if len(m_act) > 1 else ""
-                qty = int(m_act[2]) if len(m_act) > 2 else 1
-                price = float(state.market.prices.get(product, 999))
-                cost = price * qty
+            if op == "BUY_ANIMAL":
+                if len(order) < 3 or str(order[1]) not in ANIMALS:
+                    continue
+                animal = str(order[1])
+                cost = int(ANIMALS[animal]["cost"])
+                quantity = min(max(0, int(order[2])), int(projected_cash // cost))
+                if quantity > 0:
+                    safe_market.append(["BUY_ANIMAL", animal, quantity])
+                    projected_cash -= quantity * cost
+                continue
+
+            if op == "HIRE":
+                cost = _hire_cost(projected_hires)
                 if projected_cash >= cost:
-                    safe_market.append(m_act)
+                    safe_market.append(["HIRE"])
                     projected_cash -= cost
+                    projected_hires += 1
+                continue
 
-            elif action_type == "BUY_ANIMAL":
-                animal = m_act[1] if len(m_act) > 1 else ""
-                cost = float(_ANIMAL_COSTS.get(animal, 600))
-                if projected_cash >= cost:
-                    safe_market.append(m_act)
-                    projected_cash -= cost
-
-            elif action_type == "HIRE":
-                # Hire cost is fibonacci×10 (10..550). Minimum 10.
-                if projected_cash >= 10:
-                    safe_market.append(m_act)
-                    projected_cash -= 10  # conservative; actual is higher later
-
-            elif action_type == "BUY_LAND":
-                # Land costs $1000/$2000/$4000. Use 1000 as conservative deduction.
-                if projected_cash >= 1500:
-                    safe_market.append(m_act)
-                    projected_cash -= 1000
-
-            else:
-                # SELL and other actions are always safe
-                safe_market.append(m_act)
+            if op == "BUY_LAND":
+                if next_land < len(LAND_PRICES):
+                    cost = LAND_PRICES[next_land]
+                    if projected_cash >= cost:
+                        safe_market.append(["BUY_LAND"])
+                        projected_cash -= cost
+                        next_land += 1
+                continue
 
         actions["market"] = safe_market

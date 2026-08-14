@@ -26,8 +26,21 @@ class HandAssignmentSolver:
         if not hands:
             return []
 
-        # Filter to tasks with targets
-        tasks = [t for t in available_tasks if t.target is not None]
+        # Hands cannot autonomously collect a matching input from the shed.
+        # Reserve feed, fertilizer, and placement logistics for the farmer,
+        # who has a stateful pickup route; otherwise hands walk to a target
+        # and repeatedly issue no-op actions.
+        hand_safe = {
+            "HARVEST",
+            "WATER",
+            "CARE",
+            "COLLECT_FERTILIZER",
+        }
+        tasks = [
+            task
+            for task in available_tasks
+            if task.target is not None and task.task_type.value in hand_safe
+        ]
 
         if not tasks:
             return [["PASS"] for _ in hands]

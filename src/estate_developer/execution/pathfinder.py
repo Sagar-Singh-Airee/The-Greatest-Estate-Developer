@@ -38,11 +38,13 @@ class Pathfinder:
             _, current = heapq.heappop(open_set)
             
             if current == (target.x, target.y):
-                # reconstruct path
-                path = []
+                # Reconstruct an inclusive path.  Callers use ``path[1]`` as
+                # the next movement tile, so omitting the start position made
+                # an adjacent target look like it was already reached.
+                path = [Position(current[0], current[1])]
                 while current in came_from:
-                    path.append(Position(current[0], current[1]))
                     current = came_from[current]
+                    path.append(Position(current[0], current[1]))
                 path.reverse()
                 return path
                 
@@ -52,8 +54,8 @@ class Pathfinder:
                 nx, ny = cx + dx, cy + dy
                 
                 if 0 <= nx < max_x and 0 <= ny < max_y:
-                    # In a full implementation, we'd check if (nx, ny) is a hard obstacle.
-                    # Currently, farm tiles are generally walkable.
+                    if tiles[ny][nx] == "LOCKED":
+                        continue
                     tentative_g_score = g_score[current] + 1
                     
                     neighbor = (nx, ny)

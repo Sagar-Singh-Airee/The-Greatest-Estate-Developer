@@ -105,7 +105,10 @@ class StrategicTrajectoryPlanner:
             if order[0] not in ("SELL", "BUY_PRODUCT")
         ]
         action = dict(action)
-        action["market"] = filtered_market + buy_orders + sell_orders
+        # Market orders execute in list order. Selling first lets the same
+        # turn's proceeds fund expansion and avoids rejecting a valid buy
+        # before its financing order is processed.
+        action["market"] = sell_orders + filtered_market + buy_orders
         return action
 
     # ================================================================

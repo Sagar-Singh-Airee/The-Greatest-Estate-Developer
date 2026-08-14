@@ -495,6 +495,67 @@ class ProductionSlotAllocator:
 
         return ranked[0]
 
+    def crop_portfolio(
+        self,
+        state,
+        slots: int,
+    ) -> list[str]:
+        """Build a diversified crop batch for the currently free land.
+
+        A single best-crop lookup followed by a ten-seed purchase creates a
+        concentrated bet before the allocator has a chance to observe its own
+        new exposure. This small greedy allocator re-applies concentration
+        penalties after every planned slot, producing a portfolio that still
+        favors real ROI but does not flood one market.
+        """
+        slots = max(0, min(int(slots), self.free_slot_count(state)))
+        if slots == 0:
+            return []
+
+        active_counts: dict[str, int] = {}
+        active_total = 0
+        for row in state.me.tiles:
+            for tile in row:
+                if not isinstance(tile, dict) or tile.get("kind") != "PLANT":
+                    continue
+                crop = str(tile.get("crop", ""))
+                if crop in self.ONE_TIME_CROPS:
+                    active_counts[crop] = active_counts.get(crop, 0) + 1
+                    active_total += 1
+
+        candidates = [
+            self.evaluate(crop, state)
+            for crop in self.ONE_TIME_CROPS
+            if self.evaluate(crop, state).season_feasible
+        ]
+        allocation: list[str] = []
+
+        for _ in range(slots):
+            total_after = active_total + len(allocation) + 1
+
+            def fraction(candidate: SlotCandidate) -> float:
+                existing = active_counts.get(candidate.crop, 0)
+                planned = allocation.count(candidate.crop)
+                return (existing + planned + 1) / total_after
+
+            # No open batch gets more than half its production slots in one
+            # commodity. If every option would breach that cap (the first
+            # slot), fall back to raw ROI rather than producing nothing.
+            eligible = [
+                candidate for candidate in candidates
+                if fraction(candidate) <= 0.50
+            ]
+            best = max(
+                eligible or candidates,
+                key=lambda candidate: candidate.contribution_per_tile_day,
+                default=None,
+            )
+            if best is None:
+                break
+            allocation.append(best.crop)
+
+        return allocation
+
     # ========================================================
     # DEBUG SUMMARY
     # ========================================================
