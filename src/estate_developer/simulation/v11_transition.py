@@ -289,6 +289,61 @@ def apply_unit_action(
     # PLANT
     # --------------------------------------------------------
 
+    if op == "PICKUP":
+        if not _is_shed_adjacent(
+            (fx, fy),
+            context.board_size,
+        ):
+            return
+
+        if len(action) < 2:
+            return
+
+        item = str(action[1])
+
+        n = (
+            int(action[2])
+            if len(action) >= 3
+            else 1
+        )
+
+        if n <= 0:
+            return
+
+        inventory = _farmer_inventory(
+            private,
+            unit_index,
+        )
+
+        available = int(
+            private.shed.get(
+                item,
+                0,
+            )
+        )
+
+        n = min(
+            n,
+            available,
+        )
+
+        if n <= 0:
+            return
+
+        # Match Kaggriculture:
+        # preserve the zero-valued shed key.
+        private.shed[item] = (
+            available - n
+        )
+
+        _inv_add(
+            inventory,
+            item,
+            n,
+        )
+
+        return
+
     if op == "PLANT":
 
         if len(action) < 2:
@@ -581,7 +636,14 @@ def apply_unit_action(
             unit_index,
         )
 
-        # Animal placement on a matching empty structure.
+        # ----------------------------------------------------
+        # Animal placement.
+        #
+        # IMPORTANT:
+        # If the tile is NOT a matching structure, we MUST
+        # fall through to the shed-drop behavior below.
+        # ----------------------------------------------------
+
         if item in ANIMALS:
 
             animal_data = ANIMALS[item]
@@ -612,10 +674,12 @@ def apply_unit_action(
                     "pending_care_bonus": 0,
                 }
 
-            return
+                return
 
-        # Otherwise PLACE may drop inventory into the shed from a
-        # shed-access tile.
+        # ----------------------------------------------------
+        # Shed drop fallback.
+        # ----------------------------------------------------
+
         if not _is_shed_adjacent(
             (fx, fy),
             context.board_size,
@@ -625,7 +689,10 @@ def apply_unit_action(
         if len(action) >= 3:
             try:
                 quantity = int(action[2])
-            except (TypeError, ValueError):
+            except (
+                TypeError,
+                ValueError,
+            ):
                 return
         else:
             quantity = 1
@@ -672,6 +739,7 @@ def apply_unit_action(
         )
 
         return
+
 
     # --------------------------------------------------------
     # FEED
