@@ -76,18 +76,24 @@ class StrategicTrajectoryPlanner:
         """Run beam search and return the full action sequence."""
         return self.beam_search.plan(state)
 
-    def _inject_sell_orders(
+    def _inject_market_orders(
         self,
         state: ObservationState,
         action: dict[str, Any],
         opponent_model: OpponentModel,
     ) -> dict[str, Any]:
         """
-        Overlay the authoritative market sell orders onto an action dict.
-        Strip any naive SELL orders from the beam search (it doesn't know
-        optimal sell timing) and replace with the MarketManager's decisions.
+        Overlay optimal market orders onto an action dict.
+        - Removes naive SELL orders from beam search.
+        - Injects MarketManager's optimal SELL orders (price-timed).
+        - Injects arbitrage BUY_PRODUCT orders (shop demand exploitation).
+        - Injects emergency WHEAT buys if animals need feeding.
         """
         sell_orders = self.market_manager.get_optimal_sell_orders(
+            state,
+            opponent_model=opponent_model,
+        )
+        buy_orders = self.market_manager.get_optimal_buy_orders(
             state,
             opponent_model=opponent_model,
         )
@@ -95,10 +101,10 @@ class StrategicTrajectoryPlanner:
         filtered_market = [
             order
             for order in action.get("market", [])
-            if order[0] != "SELL"
+            if order[0] not in ("SELL", "BUY_PRODUCT")
         ]
         action = dict(action)
-        action["market"] = filtered_market + sell_orders
+        action["market"] = filtered_market + buy_orders + sell_orders
         return action
 
     # ================================================================
@@ -140,8 +146,8 @@ class StrategicTrajectoryPlanner:
         else:
             next_action = {"farmer": ["PASS"], "hands": [], "market": []}
 
-        # ---- Overlay optimal sell orders (market timing is per-step)
-        next_action = self._inject_sell_orders(state, next_action, opponent_model)
+        # ---- Overlay optimal market orders (sell + buy arbitrage)
+        next_action = self._inject_market_orders(state, next_action, opponent_model)
 
         # ---- Hard-constraint enforcement
         self.guard.enforce(state, next_action)

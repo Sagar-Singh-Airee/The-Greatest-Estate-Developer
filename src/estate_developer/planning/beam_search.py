@@ -108,6 +108,19 @@ class BeamSearchPlanner:
             )
         )
 
+        # Arbitrage and emergency buy orders — injected into every candidate
+        # so the simulator can evaluate the net cash/inventory effect.
+        buy_orders = (
+            market_manager.get_optimal_buy_orders(
+                state,
+                opponent_model=opponent_model,
+            )
+        )
+
+        # Combine: sell first (revenue), then buy (arbitrage). Cap at 8
+        # to leave room for task-specific orders (BUY_SEED, HIRE, etc.)
+        base_market_orders: list[list] = (sell_orders + buy_orders)[:8]
+
         candidates: list[
             dict[str, Any]
         ] = []
@@ -124,7 +137,7 @@ class BeamSearchPlanner:
             market_orders: list[
                 list[Any]
             ] = list(
-                sell_orders
+                base_market_orders
             )
 
             tt = selected_task.task_type

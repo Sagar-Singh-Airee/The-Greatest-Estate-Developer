@@ -31,6 +31,9 @@ from estate_developer.planning.tasks import (
     TaskType,
 )
 
+from estate_developer.execution.pathfinder import Pathfinder
+from estate_developer.state.parser import Position
+
 
 class TaskScheduler:
     """Select the most useful currently executable task."""
@@ -41,6 +44,9 @@ class TaskScheduler:
         (4, 5),
         (5, 5),
     )
+
+    def __init__(self) -> None:
+        self._pathfinder = Pathfinder()
 
     # --------------------------------------------------------
     # Safety weights
@@ -369,13 +375,21 @@ class TaskScheduler:
             )
 
             if (x, y) != target:
-
-                return self._move_toward(
-                    x,
-                    y,
-                    target[0],
-                    target[1],
-                )
+                # Use A* for shed navigation too
+                start_pos = Position(x, y)
+                target_pos = Position(target[0], target[1])
+                path = self._pathfinder.find_path(state, start_pos, target_pos)
+                if path and len(path) > 1:
+                    next_pos = path[1]
+                    if next_pos.x > x:
+                        return ["EAST"]
+                    elif next_pos.x < x:
+                        return ["WEST"]
+                    elif next_pos.y > y:
+                        return ["SOUTH"]
+                    elif next_pos.y < y:
+                        return ["NORTH"]
+                return self._move_toward(x, y, target[0], target[1])
 
             return [
                 "PLACE",
@@ -396,13 +410,22 @@ class TaskScheduler:
         tx, ty = task.target
 
         if (x, y) != (tx, ty):
-
-            return self._move_toward(
-                x,
-                y,
-                tx,
-                ty,
-            )
+            # Use A* for optimal path rather than naive greedy move
+            start_pos = Position(x, y)
+            target_pos = Position(tx, ty)
+            path = self._pathfinder.find_path(state, start_pos, target_pos)
+            if path and len(path) > 1:
+                next_pos = path[1]
+                if next_pos.x > x:
+                    return ["EAST"]
+                elif next_pos.x < x:
+                    return ["WEST"]
+                elif next_pos.y > y:
+                    return ["SOUTH"]
+                elif next_pos.y < y:
+                    return ["NORTH"]
+            # Fallback to greedy if A* fails
+            return self._move_toward(x, y, tx, ty)
 
         if task.task_type == TaskType.HARVEST:
             return ["HARVEST"]

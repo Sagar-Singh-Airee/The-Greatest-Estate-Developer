@@ -8,11 +8,20 @@ if TYPE_CHECKING:
 
 class MarketManager:
     """
-    Tracks and predicts market prices for optimal selling.
-    Integrates town demand forecasting and opponent pressure.
+    Tracks and predicts market prices for optimal selling and buying.
+    Integrates town demand forecasting, opponent pressure, and arbitrage.
     """
     
     I0 = 10000
+
+    # Max units to buy per arbitrage opportunity per step.
+    MAX_ARBITRAGE_BUY = 10
+
+    # Minimum expected profit multiplier to trigger a buy (30% margin).
+    ARBITRAGE_MIN_MARGIN = 1.30
+
+    # Max fraction of current cash to spend on arbitrage in one step.
+    ARBITRAGE_CASH_FRACTION = 0.25
     
     MARKET_PARAMS = {
         "WHEAT": {"base": 25, "T": 400, "below_func": "sqrt", "below_target": 0.8, "above_func": "log", "above_target": 0.2},
@@ -38,6 +47,109 @@ class MarketManager:
         elif func_name == "log10":
             return math.log10(1 + max(0, x))
         return x
+
+    def get_optimal_buy_orders(
+        self,
+        state: "ObservationState",
+        opponent_model: "OpponentModel | None" = None,
+    ) -> list[list]:
+        """
+        Market Arbitrage Engine.
+
+        Identifies products that:
+          1. Are demanded by currently unlocked Town Shops (guaranteed buyer).
+          2. Are currently priced BELOW base price (market is oversupplied).
+          3. Are predicted to rise above the buy price × ARBITRAGE_MIN_MARGIN
+             within the next 2 days as shops drain supply.
+
+        Generates BUY_PRODUCT orders when all three conditions are met.
+        Also generates emergency WHEAT buys when animals need feeding and
+        the shed wheat is critically low.
+        """
+        orders = []
+        market_inv = state.market.inventory
+        market_prices = state.market.prices
+        current_money = state.me.money
+        budget = current_money * self.ARBITRAGE_CASH_FRACTION
+
+        unlocked_shops = getattr(
+            getattr(state, "town", None), "unlocked_shops", []
+        ) or []
+
+        forecaster = TownDemandForecaster(market_manager=self)
+
+        # ---- Emergency wheat buy for animal feeding ----
+        animal_count = sum(
+            1
+            for row in state.me.tiles
+            for tile in row
+            if isinstance(tile, dict)
+            and tile.get("kind") in ("COOP", "PASTURE")
+            and "animal" in tile
+        )
+        if animal_count > 0:
+            shed_wheat = int(state.private.shed.get("WHEAT", 0))
+            # If wheat in shed covers fewer than 3 days of feeding, emergency-buy
+            if shed_wheat < animal_count * 3:
+                wheat_price = float(market_prices.get("WHEAT", 25))
+                need = min(
+                    animal_count * 6 - shed_wheat,  # buffer up to 6 days
+                    self.MAX_ARBITRAGE_BUY * 3,
+                )
+                cost = need * wheat_price
+                if cost <= budget and cost <= current_money * 0.5:
+                    orders.append(["BUY_PRODUCT", "WHEAT", int(need)])
+                    budget -= cost
+
+        # ---- Arbitrage: buy under-priced shop-demanded products ----
+        from estate_developer.simulation.reference_rules import SHOPS
+
+        # Collect all products demanded by currently unlocked shops
+        demanded: set[str] = set()
+        for shop in unlocked_shops:
+            for product in SHOPS.get(shop, ()):
+                demanded.add(product)
+
+        for product in demanded:
+            current_inv = int(market_inv.get(product, self.I0))
+            current_price = float(market_prices.get(product, self.calculate_price(product, current_inv)))
+            base_price = self.MARKET_PARAMS.get(product, {}).get("base", current_price)
+
+            # Only buy when price is below base (surplus, cheap supply)
+            if current_price >= base_price:
+                continue
+
+            # Predict price 2 days out as shops drain supply
+            predicted_price = forecaster.predict_price(
+                product, current_inv, days_ahead=2, unlocked_shops=list(unlocked_shops)
+            )
+
+            # Check minimum profit threshold
+            if predicted_price < current_price * self.ARBITRAGE_MIN_MARGIN:
+                continue
+
+            # Don't hold more than 20 units of any one product
+            shed_qty = int(state.private.shed.get(product, 0))
+            if shed_qty >= 20:
+                continue
+
+            buy_qty = min(
+                self.MAX_ARBITRAGE_BUY,
+                int(budget // max(1, current_price)),
+            )
+            if buy_qty <= 0:
+                continue
+
+            cost = buy_qty * current_price
+            if cost > current_money * 0.4:  # never spend more than 40% on one buy
+                buy_qty = max(1, int(current_money * 0.4 / max(1, current_price)))
+                cost = buy_qty * current_price
+
+            if buy_qty > 0 and cost <= budget:
+                orders.append(["BUY_PRODUCT", product, buy_qty])
+                budget -= cost
+
+        return orders
 
     def calculate_price(self, resource: str, inventory: int) -> int:
         if resource not in self.MARKET_PARAMS:
@@ -92,8 +204,15 @@ class MarketManager:
         if opponent_model is not None:
             opp_dominant = opponent_model.dominant_crop()
 
+        # Products that benefit enormously from supply-bombing:
+        # WOOL uses sq price curve (price explodes when inventory < I0)
+        # MELON uses sq curve on above side with high above_target
+        # Hold these until town shops drain market below spike threshold.
+        SPIKE_HOLD_PRODUCTS = {"WOOL", "MELON"}
+        SPIKE_THRESHOLD = 9500  # hold until market inventory < this
+
         shed_count = sum(v for v in shed.values() if isinstance(v, (int, float)))
-        needs_space = shed_count > 80
+        needs_space = shed_count >= 70  # was 80; tighter to avoid gridlock
 
         for resource, quantity in shed.items():
             if not isinstance(quantity, (int, float)) or quantity <= 0:
@@ -102,6 +221,11 @@ class MarketManager:
             current_inv = int(market_inv.get(resource, self.I0))
             current_price = float(market_prices.get(resource, self.calculate_price(resource, current_inv)))
             base_price = self.MARKET_PARAMS.get(resource, {}).get("base", 0)
+
+            # --- Hard override: shed full, sell everything immediately ---
+            if needs_space:
+                orders.append(["SELL", resource, int(quantity)])
+                continue
 
             # --- Predatory Front-Running ---
             # If the opponent is about to sell the same crop, dump everything NOW
@@ -113,24 +237,30 @@ class MarketManager:
                 orders.append(["SELL", resource, sell_qty])
                 continue
 
+            # --- Supply Bombing: hold WOOL/MELON until inventory drains ---
+            if resource in SPIKE_HOLD_PRODUCTS:
+                if current_inv >= SPIKE_THRESHOLD:
+                    # Market still flooded, hold and let shops drain it
+                    continue
+                # Market has drained below threshold — DUMP everything for spike price
+                orders.append(["SELL", resource, sell_qty])
+                continue
+
             # --- Hold logic: will price rise significantly in 3 days? ---
-            should_hold = (
-                not needs_space
-                and forecaster.should_hold(
-                    resource,
-                    current_inv,
-                    current_price,
-                    unlocked_shops,
-                    days_ahead=3,
-                    hold_threshold=1.15,
-                )
+            should_hold = forecaster.should_hold(
+                resource,
+                current_inv,
+                current_price,
+                unlocked_shops,
+                days_ahead=3,
+                hold_threshold=1.15,
             )
 
             if should_hold:
                 continue
 
-            # Sell if price is near or above base, or we need space
-            if current_price >= base_price * 0.9 or needs_space:
+            # Sell if price is near or above base
+            if current_price >= base_price * 0.9:
                 orders.append(["SELL", resource, sell_qty])
 
         return orders

@@ -35,8 +35,9 @@ SHOP_DEMAND: dict[str, dict[str, int]] = {
     "FARMERS_MARKET": {"WHEAT": 1, "CARROT": 1, "TOMATO": 1, "STRAWBERRY": 1},
 }
 
-# Town center removes 1 of every product per day
-TOWN_CENTER_DAILY: int = 1
+# Town center consumes products following the schedule:
+# if market inventory > 20: 4 units/day; > 10: 2 units/day; else: 1
+TOWN_CENTER_DEMAND_SCHEDULE = ((20, 4), (10, 2), (0, 1))  # (threshold, daily_rate)
 
 # Ticks per day
 TICKS_PER_DAY: int = 24
@@ -57,19 +58,36 @@ class TownDemandForecaster:
     def __init__(self, market_manager=None):
         self._market = market_manager
 
-    def daily_drain_rates(self, unlocked_shops: list[str]) -> dict[str, float]:
+    def daily_drain_rates(
+        self,
+        unlocked_shops: list[str],
+        market_inventory: dict | None = None,
+    ) -> dict[str, float]:
         """
         Compute units-per-day drained from market inventory by town
         for the current shop configuration.
+
+        market_inventory: optional dict of {product: int} to compute the
+        correct TOWN_CENTER_DEMAND_SCHEDULE rate. If None, uses the
+        conservative minimum rate of 4 (highest drain = most accurate
+        price-spike forecast for premium goods).
         """
         rates: dict[str, float] = {}
 
-        # Town center: 1 unit of every product per day
+        # Town center: dynamic rate from TOWN_CENTER_DEMAND_SCHEDULE
         for product in (
             "WHEAT", "CARROT", "TOMATO", "STRAWBERRY", "MELON",
             "EGG", "MILK", "WOOL",
         ):
-            rates[product] = rates.get(product, 0.0) + TOWN_CENTER_DAILY
+            # Determine current market inventory for this product
+            inv = (market_inventory or {}).get(product, 10000)
+            # Apply the demand schedule: highest threshold that applies
+            town_rate = 1  # fallback minimum
+            for threshold, rate in TOWN_CENTER_DEMAND_SCHEDULE:
+                if inv > threshold:
+                    town_rate = rate
+                    break
+            rates[product] = rates.get(product, 0.0) + town_rate
 
         # Shops: each instance consumes SHOP_TICKS_PER_DAY times per day
         for shop in unlocked_shops:
@@ -87,12 +105,13 @@ class TownDemandForecaster:
         current_inventory: int,
         days_ahead: int,
         unlocked_shops: list[str],
+        market_inventory: dict | None = None,
     ) -> int:
         """
         Predict the market inventory of a resource N days from now,
         assuming no player activity (conservative estimate).
         """
-        rates = self.daily_drain_rates(unlocked_shops)
+        rates = self.daily_drain_rates(unlocked_shops, market_inventory=market_inventory)
         drain_per_day = rates.get(resource, 0.0)
         predicted = current_inventory - drain_per_day * days_ahead
         return max(1, int(predicted))

@@ -70,6 +70,12 @@ class TaskGenerator:
     BUY_SEED_PRIORITY = 990
     BUILD_PRIORITY = 980
 
+    # Number of tiles permanently reserved for WHEAT production
+    # when animals are on the farm. One tile of wheat yields ~4
+    # units per 4-day cycle = 1 unit/day, easily feeding 1 animal.
+    # Reserve 1 tile per 4 animals as a hard minimum.
+    WHEAT_TILES_PER_4_ANIMALS = 1
+
     def __init__(self) -> None:
         self.allocator = ProductionSlotAllocator()
 
@@ -104,11 +110,46 @@ class TaskGenerator:
             )
         )
 
-        # The economic utilization ceiling remains
-        # MAX_PRODUCTION_SLOTS = 5.
+        # The economic utilization ceiling.
         active_slots = count_active_production(
             state.me.tiles
         )
+
+        # ---- Animal census ----
+        # Count animals currently on farm to calculate wheat reserve.
+        animal_count = sum(
+            1
+            for row in state.me.tiles
+            for tile in row
+            if isinstance(tile, dict) and tile.get("kind") in ("COOP", "PASTURE") and "animal" in tile
+        )
+        # How many wheat tiles we must always keep growing.
+        wheat_reserve = max(0, (animal_count + 3) // 4) * self.WHEAT_TILES_PER_4_ANIMALS
+        # Count current active wheat tiles.
+        active_wheat = sum(
+            1
+            for row in state.me.tiles
+            for tile in row
+            if isinstance(tile, dict) and tile.get("kind") == "PLANT" and tile.get("crop") == "WHEAT"
+        )
+
+        # ----------------------------------------------------
+        # 0. Weed removal — clear before crops block planting.
+        # Weeds spread and have 0.5% spawn chance per empty tile
+        # per turn. Must be cleared aggressively.
+        # ----------------------------------------------------
+
+        for wy, wrow in enumerate(state.me.tiles):
+            for wx, wtile in enumerate(wrow):
+                if isinstance(wtile, dict) and wtile.get("kind") == "WEED":
+                    tasks.append(
+                        FarmTask(
+                            task_type=TaskType.DIG,
+                            priority=920,  # above WATER_CRITICAL(900), below HARVEST
+                            target=(wx, wy),
+                            reason="remove weed to restore production tile",
+                        )
+                    )
 
         # ----------------------------------------------------
         # 1. Scan all active production crops.
@@ -418,6 +459,34 @@ class TaskGenerator:
                 state
             )
 
+            # ---- Feed safety override ----
+            # If animals need wheat and we're below the reserve,
+            # force WHEAT regardless of what the allocator picks.
+            if (
+                animal_count > 0
+                and active_wheat < wheat_reserve
+                and candidate is not None
+                and candidate.crop != "WHEAT"
+            ):
+                # Override with WHEAT to prevent starvation.
+                from estate_developer.economics.crops import CROP_PROFILES as _CP
+                # Manufacture a pseudo-candidate pointing at WHEAT.
+                from estate_developer.economics.slot_allocator import SlotCandidate as _SC
+                candidate = _SC(
+                    crop="WHEAT",
+                    batch_size=4,
+                    market_inventory=int(state.market.inventory.get("WHEAT", self.allocator.MAX_PRODUCTION_SLOTS)),
+                    starting_price=float(state.market.prices.get("WHEAT", 25)),
+                    ending_price=float(state.market.prices.get("WHEAT", 25)),
+                    realized_revenue=4 * float(state.market.prices.get("WHEAT", 25)),
+                    seed_cost=10.0,
+                    contribution=4 * float(state.market.prices.get("WHEAT", 25)) - 10.0,
+                    production_days=4,
+                    remaining_days_after_harvest=0,
+                    contribution_per_tile_day=(4 * float(state.market.prices.get("WHEAT", 25)) - 10.0) / 4.0,
+                    season_feasible=True,
+                )
+
             if candidate is not None:
 
                 chosen = candidate.crop
@@ -435,8 +504,10 @@ class TaskGenerator:
                     )
                     setup_action = animal_profile["setup_action"]
 
+                    # Zone: animals go near the shed for minimal daily walking
                     target = self._find_empty_production_tile(
-                        state.me.tiles
+                        state.me.tiles,
+                        prefer_near_shed=True,
                     )
 
                     if target is not None:
@@ -491,9 +562,11 @@ class TaskGenerator:
                     # Plant immediately if the correct seed exists.
                     if seed_count > 0:
 
+                    # Zone: crops go to far tiles to preserve near-shed space for animals
                         target = (
                             self._find_empty_production_tile(
-                                state.me.tiles
+                                state.me.tiles,
+                                prefer_near_shed=False,
                             )
                         )
 
@@ -578,16 +651,22 @@ class TaskGenerator:
                 )
             )
             
-        # Aggressive expansion: Buy land immediately if physically out of space,
-        # provided we have 1500 to cover the land and immediate seed costs.
+        # Aggressive expansion: Buy land immediately if physically out of space.
+        # Land costs: NE=$1000, SW=$2000, SE=$4000.
+        # Use the count of currently unlocked quadrants to determine next cost.
+        # Add a $500 buffer so we don't go broke on purchase.
         physical_free = len(self._find_empty_production_tiles(state.me.tiles))
-        if physical_free == 0 and active_slots < self.MAX_PRODUCTION_SLOTS and state.me.money >= 1500:
+        _LAND_PRICES = (1000, 2000, 4000)  # NE, SW, SE in unlock order
+        _unlocked_count = len(getattr(state.me, "unlocked_quadrants", []) or [])
+        _next_land_cost = _LAND_PRICES[min(_unlocked_count - 1, len(_LAND_PRICES) - 1)] if _unlocked_count >= 1 else 1000
+        _land_budget = _next_land_cost + 500
+        if physical_free == 0 and active_slots < self.MAX_PRODUCTION_SLOTS and state.me.money >= _land_budget:
             tasks.append(
                 FarmTask(
                     task_type=TaskType.BUY_LAND,
                     priority=self.BUY_SEED_PRIORITY + 2,
                     quantity=1,
-                    reason="buy land for industrial capacity expansion"
+                    reason=f"buy land (${_next_land_cost}) for industrial capacity expansion"
                 )
             )
 
@@ -734,14 +813,30 @@ class TaskGenerator:
     def _find_empty_production_tile(
         self,
         tiles,
+        prefer_near_shed: bool = False,
     ):
-        production_tiles = (
-            discover_production_tiles(
-                tiles
-            )
-        )
+        """
+        Return the best empty production tile for the given use case.
+
+        prefer_near_shed=True  → animals/structures (daily maintenance):
+            Clusters near the shed origin (0,0) to minimise daily
+            CARE/FEED/COLLECT walking distances.
+
+        prefer_near_shed=False → crops (planted once, watered daily but
+            otherwise low-maintenance): Picks tiles away from origin so
+            that crops and animals don't compete for the same prime real
+            estate.
+        """
+        production_tiles = discover_production_tiles(tiles)
 
         if not production_tiles:
             return None
 
-        return production_tiles[0]
+        if prefer_near_shed:
+            # Sort by Manhattan distance to shed (corner at 0,0)
+            sorted_tiles = sorted(production_tiles, key=lambda c: c[0] + c[1])
+        else:
+            # Push crops to the far end of the board
+            sorted_tiles = sorted(production_tiles, key=lambda c: -(c[0] + c[1]))
+
+        return sorted_tiles[0]
