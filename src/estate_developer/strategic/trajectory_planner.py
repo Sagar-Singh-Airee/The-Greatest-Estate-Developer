@@ -21,6 +21,9 @@ class StrategicTrajectoryPlanner:
             - The plan cache is empty (plan exhausted).
             - State diverges significantly from expectations (money changed
               unexpectedly or a tile we expected to be free is occupied).
+
+    V13: Integrates with MarketManager which now uses PriceForecaster and
+         OpponentSellPredictor for optimal sell timing and arbitrage.
     """
 
     def __init__(self):
@@ -56,11 +59,10 @@ class StrategicTrajectoryPlanner:
         if state.step != self._last_step + 1:
             return True
 
-        # Unexpected large money change (±2000 coins outside our market orders)
-        # Old threshold of 600 caused replanning on every sell, wasting compute.
+        # Unexpected large money change (threshold raised to 5000)
         if self._last_money is not None:
             delta = abs(state.me.money - self._last_money)
-            if delta > 2000:
+            if delta > 5000:
                 return True
 
         return False
@@ -86,7 +88,7 @@ class StrategicTrajectoryPlanner:
         """
         Overlay optimal market orders onto an action dict.
         - Removes naive SELL orders from beam search.
-        - Injects MarketManager's optimal SELL orders (price-timed).
+        - Injects MarketManager's optimal SELL orders (now price-forecast-driven).
         - Injects arbitrage BUY_PRODUCT orders (shop demand exploitation).
         - Injects emergency WHEAT buys if animals need feeding.
         """

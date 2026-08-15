@@ -1,4 +1,3 @@
-
 """
 Kaggriculture observation parser.
 

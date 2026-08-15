@@ -1,27 +1,12 @@
-
 """
-V1.4 Value-Aware Task Scheduler.
+V1.5 Value-Aware Task Scheduler (Fully Optimised).
 
-Instead of relying only on fixed task priorities, V1.4
-scores each task using:
-
-    urgency
-    + economic value
-    + quantity
-    + failure risk
-    - movement cost
-
-Safety remains dominant:
-    avoiding crop failure is more important than marginal
-    revenue optimization.
-
-This is still an execution scheduler.
-
-It does NOT perform:
-    - market forecasting
-    - investment analysis
-    - opponent modelling
-    - land optimisation
+Changes from V1.4:
+    - Watering now beats EVERYTHING (critical base = 3000 + 1000/unwatered day).
+    - Movement cost tripled (15 per step) to discourage cross‑map treks.
+    - Greedy fallback removed → farmer PASSes if A* cannot find a path.
+    - Bulk pickup: grabs up to 5 units when visiting the shed.
+    - Proximity bonus: adds a small discount for nearby tasks.
 """
 
 from __future__ import annotations
@@ -51,36 +36,31 @@ class TaskScheduler:
         self._pathfinder = Pathfinder()
 
     # --------------------------------------------------------
-    # Safety weights
+    # Safety weights (adjusted)
     # --------------------------------------------------------
 
     HARVEST_BASE = 1000
 
-    WATER_CRITICAL_BASE = 1800
+    WATER_CRITICAL_BASE = 3000          # was 1800
     WATER_NORMAL_BASE = 950
 
     PLACE_BASE = 700
-
     PLANT_BASE = 600
-
     BUY_SEED_BASE = 500
-
     PASS_BASE = 0
 
     # --------------------------------------------------------
     # Economic scaling
     # --------------------------------------------------------
 
-    # Keep economic influence deliberately small in V1.4.
-    # We are improving scheduling, not turning this into V2.
     VALUE_WEIGHT = 2.0
 
-    # Movement has a real opportunity cost because the farmer
-    # can only perform one operation per turn.
-    MOVE_COST_PER_STEP = 4.0
+    # Movement now expensive – farmer stays local
+    MOVE_COST_PER_STEP = 15.0           # was 4.0
+    LONG_ROUTE_PENALTY = 2.0            # was 1.0
 
-    # Strong penalty for tasks requiring several moves.
-    LONG_ROUTE_PENALTY = 1.0
+    # Proximity bonus: adds a small nudge for nearby tasks
+    PROXIMITY_BONUS_WEIGHT = 0.5
 
     # ========================================================
     # TASK SELECTION
@@ -93,7 +73,6 @@ class TaskScheduler:
     ) -> FarmTask:
 
         if not tasks:
-
             return FarmTask(
                 task_type=TaskType.PASS,
                 priority=self.PASS_BASE,
@@ -103,34 +82,18 @@ class TaskScheduler:
         scored = []
 
         for task in tasks:
+            score = self.score(task, state)
+            scored.append((score, task))
 
-            score = self.score(
-                task,
-                state,
-            )
-
-            scored.append(
-                (
-                    score,
-                    task,
-                )
-            )
-
-        # Deterministic tie breaking:
-        # preserve the generator's existing priority and then
-        # prefer the task with the higher raw priority.
         scored.sort(
-            key=lambda item: (
-                item[0],
-                item[1].priority,
-            ),
+            key=lambda item: (item[0], item[1].priority),
             reverse=True,
         )
 
         return scored[0][1]
 
     # ========================================================
-    # SCORING
+    # SCORING (with proximity bonus)
     # ========================================================
 
     def score(
@@ -143,169 +106,79 @@ class TaskScheduler:
 
         Safety dominates.
         Economic value only breaks relatively safe choices.
+        Proximity bonus favours nearby tasks.
         """
 
         x = state.me.farmer.x
         y = state.me.farmer.y
 
-        score = float(
-            task.priority
-        )
+        score = float(task.priority)
 
         # ----------------------------------------------------
-        # HARD SAFETY / URGENCY
+        # WATER – now beats harvest
         # ----------------------------------------------------
 
         if task.task_type == TaskType.WATER:
-
             tile = self._tile_at(
                 state.me.tiles,
                 *(task.target or (x, y)),
             )
-
             unwatered = 0
-
             if isinstance(tile, dict):
-                unwatered = int(
-                    tile.get(
-                        "consecutive_unwatered",
-                        0,
-                    )
-                )
+                unwatered = int(tile.get("consecutive_unwatered", 0))
 
             if unwatered >= 1:
-
-                # Critical watering should dominate almost
-                # every non-critical task.
                 score = max(
                     score,
-                    self.WATER_CRITICAL_BASE,
+                    self.WATER_CRITICAL_BASE + 1000 * unwatered,
                 )
-
-                score += 500 * unwatered
-
             else:
-
-                score = max(
-                    score,
-                    self.WATER_NORMAL_BASE,
-                )
+                score = max(score, self.WATER_NORMAL_BASE)
 
         # ----------------------------------------------------
         # HARVEST VALUE
         # ----------------------------------------------------
 
         elif task.task_type == TaskType.HARVEST:
-
             tile = self._tile_at(
                 state.me.tiles,
                 *(task.target or (x, y)),
             )
-
             yield_units = 1
-
             if isinstance(tile, dict):
-                yield_units = max(
-                    1,
-                    int(
-                        tile.get(
-                            "yield_units",
-                            1,
-                        )
-                    ),
-                )
+                yield_units = max(1, int(tile.get("yield_units", 1)))
 
             market_price = float(
-                state.market.prices.get(
-                    task.crop or "WHEAT",
-                    0,
-                )
+                state.market.prices.get(task.crop or "WHEAT", 0)
             )
-
-            economic_value = (
-                yield_units * market_price
-            )
-
-            score += (
-                self.VALUE_WEIGHT
-                * economic_value
-            )
+            economic_value = yield_units * market_price
+            score += self.VALUE_WEIGHT * economic_value
 
         # ----------------------------------------------------
-        # NEW ANIMAL / GENERAL TASKS
-        # ----------------------------------------------------
-        elif task.task_type in (
-            TaskType.FEED,
-            TaskType.CARE,
-            TaskType.COLLECT_FERTILIZER,
-            TaskType.FERTILIZE,
-            TaskType.BUILD_COOP,
-            TaskType.BUILD_PASTURE,
-            TaskType.DIG
-        ):
-            # For these, priority is already heavily managed by generator
-            score += 0.0
-
-        # ----------------------------------------------------
-        # PLACE VALUE
+        # Other tasks – keep their base priority
         # ----------------------------------------------------
 
-        elif task.task_type == TaskType.PLACE:
+        # FEED, CARE, COLLECT_FERTILIZER, FERTILIZE, BUILD, DIG
+        # Already have high priorities from generator.
 
-            # PLACE is logistics, not a revenue-generating
-            # action. The harvested goods already exist.
-            #
-            # Do not add their market value to PLACE, otherwise
-            # a large carried batch can overwhelm urgent
-            # replacement-seed / planting decisions.
-            score += 0.0
+        # PLACE / PLANT / BUY_SEED / etc. – no extra score
 
         # ----------------------------------------------------
-        # PLANT
+        # MOVEMENT COST (now heavily penalised)
         # ----------------------------------------------------
 
-        elif task.task_type == TaskType.PLANT:
-
-            market_price = float(
-                state.market.prices.get(
-                    task.crop or "WHEAT",
-                    0,
-                )
-            )
-
-            # Small forward-looking value signal.
-            score += (
-                self.VALUE_WEIGHT
-                * 0.25
-                * market_price
-            )
-
-        # BUY_SEED/BUY_ANIMAL/HIRE/BUY_LAND are market-only; no farmer action.
-        elif task.task_type in (
-            TaskType.BUY_SEED,
-            TaskType.BUY_ANIMAL,
-            TaskType.HIRE,
-            TaskType.BUY_LAND,
-        ):
-            # Buying itself has no direct revenue. Keep the
-            # action useful but below execution-critical work.
-            score += 0.0
+        distance = self._task_distance(x, y, task)
+        score -= distance * self.MOVE_COST_PER_STEP
+        if distance > 5:
+            score -= distance * self.LONG_ROUTE_PENALTY
 
         # ----------------------------------------------------
-        # MOVEMENT COST
+        # PROXIMITY BONUS – favours nearby tasks
         # ----------------------------------------------------
 
-        distance = self._task_distance(
-            x,
-            y,
-            task,
-        )
-
-        score -= (
-            distance
-            * self.MOVE_COST_PER_STEP
-            * self.LONG_ROUTE_PENALTY
-        )
+        # If distance is small, add a tiny bonus
+        if distance <= 2:
+            score += self.PROXIMITY_BONUS_WEIGHT * (3 - distance)
 
         return score
 
@@ -321,27 +194,16 @@ class TaskScheduler:
     ) -> int:
 
         if task.task_type == TaskType.PLACE:
-
-            target = self._nearest_shed_tile(
-                x,
-                y,
-            )
-
-            return (
-                abs(x - target[0])
-                + abs(y - target[1])
-            )
+            target = self._nearest_shed_tile(x, y)
+            return abs(x - target[0]) + abs(y - target[1])
 
         if task.target is None:
             return 0
 
-        return (
-            abs(x - task.target[0])
-            + abs(y - task.target[1])
-        )
+        return abs(x - task.target[0]) + abs(y - task.target[1])
 
     # ========================================================
-    # FARMER ACTION
+    # FARMER ACTION (SAFE – no greedy fallback)
     # ========================================================
 
     def farmer_action(
@@ -349,12 +211,10 @@ class TaskScheduler:
         task: FarmTask,
         state,
     ) -> list[str]:
-
         x = state.me.farmer.x
         y = state.me.farmer.y
 
-        # Market-only tasks — farmer is FREE to do physical work simultaneously.
-        # Find the best physical task nearby instead of idling.
+        # Market‑only tasks → farmer does physical work.
         if task.task_type in (
             TaskType.BUY_SEED,
             TaskType.BUY_ANIMAL,
@@ -366,30 +226,23 @@ class TaskScheduler:
         if task.task_type == TaskType.PASS:
             return ["PASS"]
 
-        # Feed and fertilizer are not abstract actions: the acting farmer
-        # must first carry the resource out of the shed.  Without this bridge,
-        # animals were repeatedly sent a FEED command that could never work.
+        # ---- Pickup logic – with BULK pickup ----
         if task.task_type == TaskType.FEED:
-            supply_action = self._pickup_if_needed(state, "WHEAT", 1)
+            supply_action = self._pickup_if_needed(state, "WHEAT", 1, bulk=5)
             if supply_action is not None:
                 return supply_action
 
         if task.task_type == TaskType.FERTILIZE:
-            supply_action = self._pickup_if_needed(state, "FERTILIZER", 1)
+            supply_action = self._pickup_if_needed(state, "FERTILIZER", 1, bulk=5)
             if supply_action is not None:
                 return supply_action
 
-        # ----------------------------------------------------
-        # PLACE
-        # ----------------------------------------------------
-
+        # ---- PLACE (shed drop or animal placement) ----
         if task.task_type == TaskType.PLACE:
             is_animal_placement = task.crop in self.ANIMALS
 
             if is_animal_placement:
-                supply_action = self._pickup_if_needed(
-                    state, task.crop or "", 1
-                )
+                supply_action = self._pickup_if_needed(state, task.crop or "", 1, bulk=1)
                 if supply_action is not None:
                     return supply_action
                 target = task.target
@@ -398,104 +251,92 @@ class TaskScheduler:
             else:
                 target = self._nearest_shed_tile(x, y)
 
+            # Move toward target using A* (NO greedy fallback)
             if (x, y) != target:
-                # Use A* for shed navigation too
-                start_pos = Position(x, y)
-                target_pos = Position(target[0], target[1])
-                path = self._pathfinder.find_path(state, start_pos, target_pos)
+                path = self._pathfinder.find_path(
+                    state,
+                    Position(x, y),
+                    Position(target[0], target[1]),
+                )
                 if path and len(path) > 1:
                     next_pos = path[1]
                     if next_pos.x > x:
                         return ["EAST"]
-                    elif next_pos.x < x:
+                    if next_pos.x < x:
                         return ["WEST"]
-                    elif next_pos.y > y:
+                    if next_pos.y > y:
                         return ["SOUTH"]
-                    elif next_pos.y < y:
+                    if next_pos.y < y:
                         return ["NORTH"]
-                return self._move_toward(x, y, target[0], target[1])
+                # No path → PASS (instead of greedy)
+                return ["PASS"]
 
-            return [
-                "PLACE",
-                task.crop,
-                max(
-                    1,
-                    task.quantity,
-                ),
-            ]
+            return ["PLACE", task.crop, max(1, task.quantity)]
 
-        # ----------------------------------------------------
-        # Tile task
-        # ----------------------------------------------------
-
+        # ---- Tile tasks ----
         if task.target is None:
             return ["PASS"]
 
         tx, ty = task.target
 
         if (x, y) != (tx, ty):
-            # Use A* for optimal path rather than naive greedy move
-            start_pos = Position(x, y)
-            target_pos = Position(tx, ty)
-            path = self._pathfinder.find_path(state, start_pos, target_pos)
+            path = self._pathfinder.find_path(
+                state,
+                Position(x, y),
+                Position(tx, ty),
+            )
             if path and len(path) > 1:
                 next_pos = path[1]
                 if next_pos.x > x:
                     return ["EAST"]
-                elif next_pos.x < x:
+                if next_pos.x < x:
                     return ["WEST"]
-                elif next_pos.y > y:
+                if next_pos.y > y:
                     return ["SOUTH"]
-                elif next_pos.y < y:
+                if next_pos.y < y:
                     return ["NORTH"]
-            # Fallback to greedy if A* fails
-            return self._move_toward(x, y, tx, ty)
+            # No path → PASS
+            return ["PASS"]
 
+        # At target – execute
         if task.task_type == TaskType.HARVEST:
             return ["HARVEST"]
-
         if task.task_type == TaskType.WATER:
             return ["WATER"]
-
         if task.task_type == TaskType.PLANT:
-            return [
-                "PLANT",
-                task.crop,
-            ]
-            
+            return ["PLANT", task.crop]
         if task.task_type == TaskType.BUILD_COOP:
             return ["BUILD_COOP"]
-            
         if task.task_type == TaskType.BUILD_PASTURE:
             return ["BUILD_PASTURE"]
-            
         if task.task_type == TaskType.DIG:
             return ["DIG"]
-            
         if task.task_type == TaskType.FERTILIZE:
             return ["FERTILIZE"]
-            
         if task.task_type == TaskType.FEED:
             return ["FEED"]
-            
         if task.task_type == TaskType.CARE:
             return ["CARE"]
-            
         if task.task_type == TaskType.COLLECT_FERTILIZER:
             return ["COLLECT_FERTILIZER"]
 
         return ["PASS"]
+
+    # ========================================================
+    # PICKUP WITH BULK
+    # ========================================================
 
     def _pickup_if_needed(
         self,
         state,
         item: str,
         quantity: int,
+        bulk: int = 1,
     ) -> list[str] | None:
-        """Return a movement/PICKUP action until the farmer carries ``item``.
+        """
+        Return a movement/PICKUP action until the farmer carries the item.
 
-        ``None`` means the farmer already has the item and can continue with
-        the originally selected field task.
+        bulk: maximum units to pick up (e.g., 5 for WHEAT, 5 for FERTILIZER).
         """
         inventory = (
             state.private.inventories[0]
@@ -513,50 +354,41 @@ class TaskScheduler:
         x = state.me.farmer.x
         y = state.me.farmer.y
         target = self._nearest_shed_tile(x, y)
+
         if (x, y) != target:
-            return self._move_to_target(state, target)
+            path = self._pathfinder.find_path(
+                state,
+                Position(x, y),
+                Position(target[0], target[1]),
+            )
+            if path and len(path) > 1:
+                next_pos = path[1]
+                if next_pos.x > x:
+                    return ["EAST"]
+                if next_pos.x < x:
+                    return ["WEST"]
+                if next_pos.y > y:
+                    return ["SOUTH"]
+                if next_pos.y < y:
+                    return ["NORTH"]
+            return ["PASS"]
 
-        return ["PICKUP", item, min(quantity - held, available)]
-
-    def _move_to_target(self, state, target: tuple[int, int]) -> list[str]:
-        """Take one valid A* step toward a target, with a greedy fallback."""
-        x = state.me.farmer.x
-        y = state.me.farmer.y
-        path = self._pathfinder.find_path(
-            state,
-            Position(x, y),
-            Position(target[0], target[1]),
-        )
-        if path and len(path) > 1:
-            next_pos = path[1]
-            if next_pos.x > x:
-                return ["EAST"]
-            if next_pos.x < x:
-                return ["WEST"]
-            if next_pos.y > y:
-                return ["SOUTH"]
-            if next_pos.y < y:
-                return ["NORTH"]
-        return self._move_toward(x, y, target[0], target[1])
+        # At shed – pick up enough to reduce future trips
+        take = min(available, quantity - held + bulk - 1)  # grab up to `bulk` extra
+        return ["PICKUP", item, take]
 
     # ========================================================
-    # BEST PHYSICAL ACTION (farmer fallback for market turns)
+    # BEST PHYSICAL ACTION (safe PASS fallback)
     # ========================================================
 
     def _best_physical_action(self, state) -> list:
         """
-        When the farmer's primary task is market-only, find the closest
-        physical task and execute one step toward it (or execute it if
-        already on the tile). Priority: critical water > harvest > dig >
-        normal water > fertilize > plant > feed > care.
-
-        Returns a farmer action list.
+        When the farmer has no specific task, find the nearest urgent physical work.
         """
         x = state.me.farmer.x
         y = state.me.farmer.y
         tiles = state.me.tiles
-        # Scan all tiles — each priority is checked independently with its own
-        # score weight. The elif chain had a dead WATER normal branch.
+
         candidates: list[tuple[float, str, int, int]] = []
 
         for ty_i, row in enumerate(tiles):
@@ -572,18 +404,14 @@ class TaskScheduler:
                     watered = tile.get("watered_today", False)
                     yield_units = int(tile.get("yield_units", 0))
 
-                    # WATER critical — plant will die
                     if not watered and unw >= 1:
                         candidates.append((10000 - dist, "WATER", tx_i, ty_i))
-                    # HARVEST — ready to pick
                     if yield_units > 0:
                         candidates.append((8000 - dist, "HARVEST", tx_i, ty_i))
-                    # WATER normal — not yet critical but needs water today
                     if not watered and unw == 0:
                         candidates.append((6000 - dist, "WATER", tx_i, ty_i))
 
                 elif kind == "WEED":
-                    # DIG weed before it spreads
                     candidates.append((7500 - dist, "DIG", tx_i, ty_i))
 
                 elif kind in ("COOP", "PASTURE"):
@@ -594,14 +422,10 @@ class TaskScheduler:
                             unf = int(tile.get("consecutive_unfed", 0))
                             sc = (9000 if unf >= 1 else 5000) - dist
                             candidates.append((sc, "FEED", tx_i, ty_i))
-                        # Harvest animal products if ready
                         if int(tile.get("yield_units", 0)) > 0:
                             candidates.append((8500 - dist, "HARVEST", tx_i, ty_i))
-                        # CARE once each day. The live state exposes
-                        # ``cared_today``; ``needs_care`` is not a game field.
                         if not tile.get("cared_today", False):
                             candidates.append((4000 - dist, "CARE", tx_i, ty_i))
-                    # Collect fertilizer if available
                     if tile.get("fertilizer_available", False):
                         candidates.append((3500 - dist, "COLLECT_FERTILIZER", tx_i, ty_i))
 
@@ -614,71 +438,41 @@ class TaskScheduler:
         if (x, y) == (tx, ty):
             return [action_str]
 
-        # Navigate via A*
-        start_pos = Position(x, y)
-        target_pos = Position(tx, ty)
-        path = self._pathfinder.find_path(state, start_pos, target_pos)
+        # Navigate via A*, no greedy fallback
+        path = self._pathfinder.find_path(
+            state,
+            Position(x, y),
+            Position(tx, ty),
+        )
         if path and len(path) > 1:
             next_pos = path[1]
             if next_pos.x > x:
                 return ["EAST"]
-            elif next_pos.x < x:
+            if next_pos.x < x:
                 return ["WEST"]
-            elif next_pos.y > y:
+            if next_pos.y > y:
                 return ["SOUTH"]
-            elif next_pos.y < y:
+            if next_pos.y < y:
                 return ["NORTH"]
 
-        return self._move_toward(x, y, tx, ty)
+        # No path → PASS
+        return ["PASS"]
 
+    # ========================================================
+    # HELPERS
+    # ========================================================
 
     @staticmethod
-    def _tile_at(
-        tiles,
-        x: int,
-        y: int,
-    ):
+    def _tile_at(tiles, x: int, y: int):
         if y < 0 or y >= len(tiles):
             return None
-
         if x < 0 or x >= len(tiles[y]):
             return None
-
         return tiles[y][x]
 
     @classmethod
-    def _nearest_shed_tile(
-        cls,
-        x: int,
-        y: int,
-    ) -> tuple[int, int]:
-
+    def _nearest_shed_tile(cls, x: int, y: int) -> tuple[int, int]:
         return min(
             cls.SHED_TILES,
-            key=lambda pos: (
-                abs(x - pos[0])
-                + abs(y - pos[1])
-            ),
+            key=lambda pos: abs(x - pos[0]) + abs(y - pos[1]),
         )
-
-    @staticmethod
-    def _move_toward(
-        x: int,
-        y: int,
-        tx: int,
-        ty: int,
-    ) -> list[str]:
-
-        if x < tx:
-            return ["EAST"]
-
-        if x > tx:
-            return ["WEST"]
-
-        if y < ty:
-            return ["SOUTH"]
-
-        if y > ty:
-            return ["NORTH"]
-
-        return ["PASS"]

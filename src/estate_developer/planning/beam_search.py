@@ -34,12 +34,14 @@ class BeamSearchPlanner:
     Candidate generation and scoring remain unchanged.
     Forward simulation now goes exclusively through the
     certified V11-backed Simulator.
+
+    V12: Wider and deeper search for early-game aggression.
     """
 
     def __init__(
         self,
-        beam_width: int = 7,   # was 5 — wider search explores more task combos
-        max_depth: int = 5,    # was 3 — deeper plan = less frequent replanning
+        beam_width: int = 10,          # increased from 7
+        max_depth: int = 48,           # increased from 5 (2 full days)
     ):
         self.beam_width = beam_width
         self.max_depth = max_depth
@@ -163,7 +165,6 @@ class BeamSearchPlanner:
                 tt == TaskType.BUY_ANIMAL
                 and selected_task.crop
             ):
-
                 market_orders.append(
                     [
                         "BUY_ANIMAL",
@@ -181,20 +182,17 @@ class BeamSearchPlanner:
             ):
                 # A structure is built by the farmer before market orders are
                 # processed, so pairing the purchase here creates a complete
-                # build → pickup → place lifecycle rather than a stranded
-                # animal token or an empty structure.
+                # build → pickup → place lifecycle.
                 market_orders.append(
                     ["BUY_ANIMAL", selected_task.crop, 1]
                 )
 
             elif tt == TaskType.HIRE:
-
                 market_orders.append(
                     ["HIRE"]
                 )
 
             elif tt == TaskType.BUY_LAND:
-
                 market_orders.append(
                     ["BUY_LAND"]
                 )
@@ -354,7 +352,6 @@ class BeamSearchPlanner:
                         opponent_model=opponent_model,
                     )
                 )
-
 
                 for action in candidates:
 

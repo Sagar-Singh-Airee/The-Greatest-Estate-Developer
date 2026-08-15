@@ -107,4 +107,3 @@ class OpponentModel:
         if resource in ("EGG", "MILK", "WOOL"):
             return tile_count  # 1 per animal per cycle
         return tile_count * 3  # avg one-time crop yield
-

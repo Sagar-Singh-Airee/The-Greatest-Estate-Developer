@@ -12,6 +12,8 @@ Architecture:
     Strategic Trajectory Planner (Simulation + Search)
         ↓
     Action Sequence Output
+
+V13: Integrates with improved market timing and price forecasting via TrajectoryPlanner.
 """
 
 from __future__ import annotations

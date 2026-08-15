@@ -66,7 +66,7 @@ class HandAssignmentSolver:
                 for j, task in enumerate(tasks):
                     target_pos = Position(task.target[0], task.target[1])
                     path = self.pathfinder.find_path(state, hand_pos, target_pos)
-                    
+
                     if path:
                         dist = len(path) - 1
                         paths[(i, j)] = path
@@ -137,21 +137,21 @@ class HandAssignmentSolver:
                 best_task = None
                 best_score = -math.inf
                 best_path = []
-                
+
                 for task in tasks:
                     if id(task) in assigned_tasks:
                         continue
-                        
+
                     target_pos = Position(task.target[0], task.target[1])
                     path = self.pathfinder.find_path(state, hand_pos, target_pos)
                     distance = len(path) - 1 if path else math.inf
                     score = task.priority - (distance * 4.0)
-                    
+
                     if score > best_score:
                         best_score = score
                         best_task = task
                         best_path = path
-                        
+
                 if best_task and best_path:
                     assigned_tasks.add(id(best_task))
                     if len(best_path) <= 1:
@@ -187,5 +187,5 @@ class HandAssignmentSolver:
                             actions.append(["PASS"])
                 else:
                     actions.append(["PASS"])
-                    
+
         return actions

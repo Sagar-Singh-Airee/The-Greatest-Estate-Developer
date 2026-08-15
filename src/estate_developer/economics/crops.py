@@ -1,4 +1,3 @@
-
 """
 V2.0 Crop Economics Model.
 

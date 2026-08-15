@@ -72,7 +72,7 @@ class EndgamePlanner:
         hand_actions = self.hand_solver.assign(state, remaining_tasks)
         
         # 5. Market dumping — start dumping 1 full day (24 steps) before end
-        # to guarantee everything is sold. Was incorrectly set to 3.
+        # to guarantee everything is sold.
         market_actions = []
         shed = state.private.shed
         shed_count = sum(v for v in shed.values() if isinstance(v, (int, float)))

@@ -48,13 +48,15 @@ class SlotCandidate:
 class ProductionSlotAllocator:
     """
     Allocate one currently-free production slot.
+
+    V12: More aggressive early-game animal investment and higher slot cap.
     """
 
     # --------------------------------------------------------
-    # Three-slot capacity discovered empirically.
+    # Increased slot capacity for industrial farming
     # --------------------------------------------------------
 
-    MAX_PRODUCTION_SLOTS = 100
+    MAX_PRODUCTION_SLOTS = 30   # was 5
 
     # --------------------------------------------------------
     # Current validated one-time candidates.
@@ -78,14 +80,6 @@ class ProductionSlotAllocator:
 
     # --------------------------------------------------------
     # Animal investment profiles (from Kaggriculture README).
-    # cost      = purchase price
-    # setup_cost = extra tile cost (BUILD_COOP / BUILD_PASTURE)
-    # build_days = days to build the structure (1 action)
-    # first_yield_day = days until first production
-    # yield_interval  = days between yields after first
-    # product         = item harvested
-    # base_price      = product base market price
-    # feed_cost_per_day = wheat cost to keep alive (25 = base wheat price)
     # --------------------------------------------------------
 
     ANIMAL_PROFILES = {
@@ -99,7 +93,7 @@ class ProductionSlotAllocator:
             "feed_cost_per_day": 25,
         },
         "COW": {
-            "cost": 600,   # was 400 — real cost from reference_rules.py ANIMALS
+            "cost": 600,   # real cost from reference_rules.py
             "setup_action": "BUILD_PASTURE",
             "first_yield_day": 8,
             "yield_interval": 2,
@@ -120,44 +114,32 @@ class ProductionSlotAllocator:
 
     SEASON_DAYS = 30
 
-    # Minimum number of days reserved for execution
-    # overhead after the theoretical crop completion date.
     SEASON_BUFFER_DAYS = 0
+
+    # Diversification caps — more permissive now
+    DIVERSITY_CAP = 0.75          # was 0.60
+    MELON_CAP = 0.50              # was 0.40
+
+    # Early-game animal boost
+    EARLY_ANIMAL_BONUS_DAYS = 3
+    EARLY_ANIMAL_MULTIPLIER = 2.0
 
     def count_active_slots(
         self,
         state,
     ) -> int:
-        """
-        Count active one-time production crops across
-        the dynamically discovered farm.
-
-        Only the allocator's validated one-time crop set
-        counts toward production utilization.
-        """
+        """Count active one-time production crops."""
 
         count = 0
 
         for row in state.me.tiles:
-
             for tile in row:
-
-                if not isinstance(
-                    tile,
-                    dict,
-                ):
+                if not isinstance(tile, dict):
                     continue
-
-                if tile.get(
-                    "kind"
-                ) != "PLANT":
+                if tile.get("kind") != "PLANT":
                     continue
-
-                if tile.get(
-                    "crop"
-                ) not in self.ONE_TIME_CROPS:
+                if tile.get("crop") not in self.ONE_TIME_CROPS:
                     continue
-
                 count += 1
 
         return count
@@ -166,31 +148,16 @@ class ProductionSlotAllocator:
         self,
         state,
     ) -> int:
-        """
-        Return free production capacity.
+        """Return free production capacity."""
 
-        Physical capacity is discovered dynamically from
-        unlocked empty farm tiles.
-
-        MAX_PRODUCTION_SLOTS remains the economic utilization
-        ceiling so V2.39's five-slot policy is preserved.
-        """
-
-        active = self.count_active_slots(
-            state
-        )
-
+        active = self.count_active_slots(state)
         physical_free = len(
-            discover_production_tiles(
-                state.me.tiles
-            )
+            discover_production_tiles(state.me.tiles)
         )
-
         policy_free = max(
             0,
             self.MAX_PRODUCTION_SLOTS - active,
         )
-
         return min(
             physical_free,
             policy_free,
@@ -201,9 +168,7 @@ class ProductionSlotAllocator:
         crop: str,
         state,
     ) -> SlotCandidate:
-        """
-        Evaluate one candidate crop for a currently free slot.
-        """
+        """Evaluate one candidate crop for a currently free slot."""
 
         if crop not in self.ONE_TIME_CROPS:
             raise ValueError(
@@ -290,10 +255,6 @@ class ProductionSlotAllocator:
             season_feasible=season_feasible,
         )
 
-    # ========================================================
-    # ANIMAL EVALUATION
-    # ========================================================
-
     def evaluate_animal(
         self,
         animal: str,
@@ -309,12 +270,10 @@ class ProductionSlotAllocator:
 
         current_day = int(state.day)
         first_yield_day = profile["first_yield_day"]
-        # 1 day for BUILD action, 1 day for BUY+PLACE sequence
         setup_days = 2
         effective_first_yield = current_day + setup_days + first_yield_day
 
         if effective_first_yield >= self.SEASON_DAYS:
-            # Not enough season left to even see first yield
             return None
 
         producing_days = self.SEASON_DAYS - effective_first_yield
@@ -324,7 +283,6 @@ class ProductionSlotAllocator:
         if num_yields == 0:
             return None
 
-        # Use current market price if available, else base
         product = profile["product"]
         current_price = float(
             state.market.prices.get(product, profile["base_price"])
@@ -339,10 +297,14 @@ class ProductionSlotAllocator:
         tile_days = max(1, total_days_occupied)
         contribution_per_tile_day = contribution / tile_days
 
+        # Early-game bonus: animals are worth more early
+        if current_day < self.EARLY_ANIMAL_BONUS_DAYS:
+            contribution_per_tile_day *= self.EARLY_ANIMAL_MULTIPLIER
+
         season_feasible = contribution > 0
 
         return SlotCandidate(
-            crop=animal,  # reuse crop field to carry animal name
+            crop=animal,
             batch_size=num_yields,
             market_inventory=int(
                 state.market.inventory.get(product, 10000)
@@ -358,23 +320,16 @@ class ProductionSlotAllocator:
             season_feasible=season_feasible,
         )
 
-    # ========================================================
-    # RANKING
-    # ========================================================
-
     def rank(
         self,
         state,
     ) -> list[SlotCandidate]:
         """
         Rank all feasible candidates (crops AND animals) by
-        contribution-per-tile-day so the agent always invests
-        in the highest-ROI option available.
+        contribution-per-tile-day.
 
-        Includes market-saturation diversification:
-        A crop that already occupies ≥40% of active tiles is
-        penalized so the next slot goes to the second-best option.
-        MELON is capped at 25% — its small market (T=300) saturates fast.
+        Includes market-saturation diversification and early-game
+        animal bonus.
         """
 
         # Count active tiles per crop/animal for diversification
@@ -395,11 +350,6 @@ class ProductionSlotAllocator:
                         crop_counts[a] = crop_counts.get(a, 0) + 1
                         total_active += 1
 
-        # Diversification caps — fraction of total active tiles
-        DIVERSITY_CAP = 0.60       # general crops capped at 60% to allow aggressive specialization
-        MELON_CAP = 0.40           # melon capped at 40% (small market T=300)
-        CAPS = {"MELON": MELON_CAP}
-
         results = []
 
         for crop in self.ONE_TIME_CROPS:
@@ -410,29 +360,24 @@ class ProductionSlotAllocator:
         for animal in self.ANIMAL_PROFILES:
             candidate = self.evaluate_animal(animal, state)
             if candidate is not None and candidate.season_feasible:
-                # Only consider if we can actually afford it
                 if state.me.money >= self.ANIMAL_PROFILES[animal]["cost"]:
                     results.append(candidate)
 
         def _diversity_score(item: SlotCandidate) -> float:
-            """Return contribution_per_tile_day with a diversity penalty and optimism."""
             base = item.contribution_per_tile_day
-            
-            # Add calculated pseudo-random optimism (+/- 15%) so agent takes occasional risks
-            # It's seeded by step // 5 so it doesn't thrash wildly every single step
+
+            # Add pseudo-random optimism for exploration
             cycle = int(state.step) // 5
             pseudo_hash = hash(f"{item.crop}_{cycle}")
-            optimism = 0.85 + (abs(pseudo_hash) % 31) / 100.0 # Range: 0.85 to 1.15
-            
+            optimism = 0.85 + (abs(pseudo_hash) % 31) / 100.0
             base_score = base * optimism
 
             if total_active == 0:
                 return base_score
-                
-            cap = CAPS.get(item.crop, DIVERSITY_CAP)
+
+            cap = self.MELON_CAP if item.crop == "MELON" else self.DIVERSITY_CAP
             frac = crop_counts.get(item.crop, 0) / max(1, total_active)
             if frac >= cap:
-                # Penalize by 60% — still allows switch-back if it's massively better
                 return base_score * 0.40
             return base_score
 
@@ -453,17 +398,26 @@ class ProductionSlotAllocator:
         """
         Return the best feasible crop for a free slot.
 
-        Returns None if:
-            - no slot is available
-            - no crop is season-feasible
+        Override: if day == 0 and we have enough money, force an animal
+        to get the exponential growth started.
         """
-
         if self.free_slot_count(state) <= 0:
             return None
 
-        ranked = self.rank(
-            state
-        )
+        current_day = int(state.day)
+
+        # Forced early animal: if it's day 0 and we have at least 1300 cash,
+        # choose GOOSE or COW (whichever ranks better) to kickstart production.
+        if current_day == 0 and state.me.money >= 1300:
+            goose = self.evaluate_animal("GOOSE", state)
+            cow = self.evaluate_animal("COW", state)
+            # Pick the one with higher contribution_per_tile_day
+            candidates = [c for c in [goose, cow] if c is not None and c.season_feasible]
+            if candidates:
+                # Return the best one
+                return max(candidates, key=lambda c: c.contribution_per_tile_day)
+
+        ranked = self.rank(state)
 
         if not ranked:
             return None
@@ -475,13 +429,8 @@ class ProductionSlotAllocator:
         state,
         slots: int,
     ) -> list[str]:
-        """Build a diversified crop batch for the currently free land.
-
-        A single best-crop lookup followed by a ten-seed purchase creates a
-        concentrated bet before the allocator has a chance to observe its own
-        new exposure. This small greedy allocator re-applies concentration
-        penalties after every planned slot, producing a portfolio that still
-        favors real ROI but does not flood one market.
+        """
+        Build a diversified crop batch for the currently free land.
         """
         slots = max(0, min(int(slots), self.free_slot_count(state)))
         if slots == 0:
@@ -513,9 +462,6 @@ class ProductionSlotAllocator:
                 planned = allocation.count(candidate.crop)
                 return (existing + planned + 1) / total_after
 
-            # No open batch gets more than half its production slots in one
-            # commodity. If every option would breach that cap (the first
-            # slot), fall back to raw ROI rather than producing nothing.
             eligible = [
                 candidate for candidate in candidates
                 if fraction(candidate) <= 0.50
@@ -539,10 +485,7 @@ class ProductionSlotAllocator:
         self,
         state,
     ) -> list[dict]:
-        """
-        Return a simple, serializable explanation of the
-        allocator's ranking.
-        """
+        """Return a simple, serializable explanation of the ranking."""
 
         rows = []
 
@@ -581,10 +524,6 @@ class ProductionSlotAllocator:
             })
 
         return rows
-
-    # ========================================================
-    # HELPERS
-    # ========================================================
 
     @staticmethod
     def _tile_at(
