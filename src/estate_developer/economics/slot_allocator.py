@@ -1,38 +1,3 @@
-
-"""
-V3.0 Universal Slot Allocator.
-
-Now ranks crops AND animals together so the agent
-chooses whichever investment type yields the highest
-contribution-per-tile-day for each free slot.
-
-The allocator decides ONLY what should occupy a FREE
-production slot.
-
-It never replaces an existing healthy crop.
-
-Initial candidate set:
-    WHEAT
-    CARROT
-    MELON
-
-Reason:
-    These are the one-time crops for which our current
-    production-batch model is sufficiently well defined.
-
-The allocator considers:
-
-    - current market inventory
-    - current market price
-    - seed cost
-    - realized batch revenue
-    - tile occupancy
-    - remaining season
-
-This is still an economic decision layer.
-It does not execute farmer actions.
-"""
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -431,8 +396,8 @@ class ProductionSlotAllocator:
                         total_active += 1
 
         # Diversification caps — fraction of total active tiles
-        DIVERSITY_CAP = 0.40       # general crops capped at 40%
-        MELON_CAP = 0.25           # melon capped at 25% (small market T=300)
+        DIVERSITY_CAP = 0.60       # general crops capped at 60% to allow aggressive specialization
+        MELON_CAP = 0.40           # melon capped at 40% (small market T=300)
         CAPS = {"MELON": MELON_CAP}
 
         results = []
@@ -450,16 +415,26 @@ class ProductionSlotAllocator:
                     results.append(candidate)
 
         def _diversity_score(item: SlotCandidate) -> float:
-            """Return contribution_per_tile_day with a diversity penalty."""
+            """Return contribution_per_tile_day with a diversity penalty and optimism."""
             base = item.contribution_per_tile_day
+            
+            # Add calculated pseudo-random optimism (+/- 15%) so agent takes occasional risks
+            # It's seeded by step // 5 so it doesn't thrash wildly every single step
+            cycle = int(state.step) // 5
+            pseudo_hash = hash(f"{item.crop}_{cycle}")
+            optimism = 0.85 + (abs(pseudo_hash) % 31) / 100.0 # Range: 0.85 to 1.15
+            
+            base_score = base * optimism
+
             if total_active == 0:
-                return base
+                return base_score
+                
             cap = CAPS.get(item.crop, DIVERSITY_CAP)
             frac = crop_counts.get(item.crop, 0) / max(1, total_active)
             if frac >= cap:
                 # Penalize by 60% — still allows switch-back if it's massively better
-                return base * 0.40
-            return base
+                return base_score * 0.40
+            return base_score
 
         results.sort(
             key=lambda item: (

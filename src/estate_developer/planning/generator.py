@@ -604,24 +604,19 @@ class TaskGenerator:
         # 5. Dynamic Expansion (Hire / Buy Land)
         # ----------------------------------------------------
         
-        # If we have task backlog and minimal cash buffer, hire!
-        # Real hire cost uses Fibonacci: fib(n) where n = hires_today.
-        # fib: 1,1,2,3,5,8,13,21... multiply by farmHandCostMult=10 → 10,10,20,30,50,80...
         hires_today = state.me.hires_today
         _FIB = (1, 1, 2, 3, 5, 8, 13, 21, 34, 55)
         _fib_val = _FIB[min(hires_today, len(_FIB) - 1)]
-        hire_cost = 10 * _fib_val  # farmHandCostMult=10 from reference rules
+        hire_cost = 10 * _fib_val
         
-        # Count high priority manual tasks (excluding PASS and market orders)
         manual_tasks = sum(1 for t in tasks if t.task_type.value not in ("PASS", "BUY_SEED") and t.priority >= self.WATER_NORMAL_PRIORITY)
         hands_count = len(state.me.hands)
+        tasks_per_hand = manual_tasks / max(1, hands_count + 1)
         
-        # Aggressive industrial hiring: hire whenever the backlog per hand
-        # exceeds 4 tasks. A 10-tile farm with 1 hand is massively bottlenecked.
-        # Backlog per hand = manual_tasks / max(1, hands_count)
-        hands_count = len(state.me.hands)
-        tasks_per_hand = manual_tasks / max(1, hands_count + 1)  # +1 for farmer
-        if tasks_per_hand > 4 and state.me.money >= hire_cost + 150:
+        hire_threshold = 1.5 if hands_count < 2 else 3.0
+        cash_buffer = 50 if hands_count < 2 else 150
+
+        if tasks_per_hand > hire_threshold and state.me.money >= hire_cost + cash_buffer:
             tasks.append(
                 FarmTask(
                     task_type=TaskType.HIRE,
@@ -631,16 +626,12 @@ class TaskGenerator:
                 )
             )
             
-        # Proactive land expansion: buy before completely running out.
-        # Trigger when fewer than 5 free tiles remain — gives the agent
-        # one full planning cycle to acquire land before being capacity-blocked.
-        # Land costs: NE=$1000, SW=$2000, SE=$4000.
         physical_free = len(self._find_empty_production_tiles(state.me.tiles))
-        _LAND_PRICES = (1000, 2000, 4000)  # NE, SW, SE in unlock order
+        _LAND_PRICES = (1000, 2000, 4000)
         _unlocked_count = len(getattr(state.me, "unlocked_quadrants", []) or [])
         _next_land_cost = _LAND_PRICES[min(_unlocked_count - 1, len(_LAND_PRICES) - 1)] if _unlocked_count >= 1 else 1000
         _land_budget = _next_land_cost + 500
-        # Buy when < 5 free tiles remain (proactive) OR when completely out
+        
         if physical_free < 5 and active_slots < self.MAX_PRODUCTION_SLOTS and state.me.money >= _land_budget:
             tasks.append(
                 FarmTask(

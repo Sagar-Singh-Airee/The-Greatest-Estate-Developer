@@ -73,7 +73,7 @@ class TerminalValueCalculator:
             days_to_first = max(0, profile.first_yield_day - age)
             if days_remaining < days_to_first:
                 return 0.0
-            return profile.max_yield_unfertilized * price * 0.75
+            return profile.max_yield_unfertilized * price * 0.90
 
         # Ongoing crops have a fixed number of production ticks (their held
         # yield cap) in the reference engine. Estimate only reachable ticks.
@@ -86,7 +86,7 @@ class TerminalValueCalculator:
             )
         remaining_capacity = max(0, profile.max_yield_unfertilized - held)
         future_units = min(remaining_capacity, future_ticks)
-        return (held + future_units * 0.75) * price
+        return (held + future_units * 0.90) * price
 
     @classmethod
     def _animal_value(
@@ -117,7 +117,7 @@ class TerminalValueCalculator:
 
         # Animals require feeding, care, collection, and sale. Discount future
         # output instead of treating them as a cost-free perpetual machine.
-        execution_factor = 0.62 if ours else 0.55
+        execution_factor = 0.85 if ours else 0.75
         return (held + future_yields * execution_factor) * price
 
     @classmethod

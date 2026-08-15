@@ -1,0 +1,440 @@
+import json
+import random
+from os import path
+from .memory import initialize_memory, track_turn, save_game_to_history
+
+BOARD_SIZE = 25
+
+def initialize_game(state, config):
+    board_size = config.board_size
+    starting_team_words = config.starting_team_words
+    second_team_words = config.second_team_words
+    
+    # Load words
+    dir_path = path.dirname(__file__)
+    words_path = path.abspath(path.join(dir_path, "words.txt"))
+    with open(words_path, "r") as f:
+        all_words = [line.strip().upper() for line in f.readlines() if line.strip()]
+        
+    # Setup deterministic random generator if seed is provided.
+    # When games_per_episode > 1, derive a fresh per-game seed from the base
+    # seed so each game uses different words while the full sequence stays
+    # reproducible from the original seed alone.
+    seed = config.get("seed")
+    current_game = state[0].observation.get("current_game", 0)
+    if seed is not None:
+        if current_game == 0:
+            rng = random.Random(seed)
+        else:
+            master_rng = random.Random(seed)
+            game_seed = 0
+            for _ in range(current_game):
+                game_seed = master_rng.randrange(2**32)
+            rng = random.Random(game_seed)
+    else:
+        rng = random
+        
+    sampled_words = rng.sample(all_words, board_size)
+    
+    # Determine playing order and word counts
+    starting_team = rng.choice(["blue", "yellow"])
+    if starting_team == "blue":
+        blue_count = starting_team_words
+        yellow_count = second_team_words
+    else:
+        blue_count = second_team_words
+        yellow_count = starting_team_words
+    
+    # Assign roles
+    roles = ["blue"] * blue_count + ["yellow"] * yellow_count + ["trap"] * 1
+    roles += ["neutral"] * (board_size - len(roles))
+    rng.shuffle(roles)
+    
+    revealed = [False] * board_size
+    
+    for agent_state in state:
+        agent_state.observation.words = sampled_words
+        agent_state.observation.roles = roles[:]
+        agent_state.observation.revealed = revealed[:]
+        agent_state.observation.current_turn = 0 if starting_team == "blue" else 2
+        agent_state.observation.clue = ""
+        agent_state.observation.guesses_remaining = 0
+        agent_state.observation.clue_number = 0
+
+        initialize_memory(agent_state.observation, board_size)
+
+def update_visibility(state):
+    # Mask roles for guessers (agents 1 and 3)
+    roles = state[0].observation.roles
+    revealed = state[0].observation.revealed
+    
+    for i in range(4):
+        if i in [1, 3]:  # Guessers
+            # Guessers only see roles of revealed cards
+            masked_roles = [roles[j] if revealed[j] else "Unknown" for j in range(BOARD_SIZE)]
+            state[i].observation.roles = masked_roles
+        else:
+            state[i].observation.roles = roles[:]
+
+# Statuses core.py assigns when an agent crashes or times out, as opposed to
+# returning a well-formed-but-illegal action. See _abort_on_agent_failure.
+_FRAMEWORK_FAILURE_STATUSES = ("ERROR", "TIMEOUT")
+
+# Reward applied to the forfeiting team when a seat submits an illegal action.
+# The opposing team receives the negation. Mirrors open_spiel_env's
+# DEFAULT_INVALID_ACTION_REWARD so forfeits score identically across envs.
+DEFAULT_INVALID_ACTION_REWARD = -1
+
+
+def _abort_on_agent_failure(state):
+    """Void the episode if the framework marked any seat ERROR or TIMEOUT.
+    Returns True if the episode was ended.
+
+    A seat that crashed or timed out is a broken participant, not a model
+    making an illegal move, and a 2v2 game cannot be scored around one.
+    Matching open_spiel_env's non-strict path, every seat is forced to ERROR
+    (a TIMEOUT seat keeps TIMEOUT, which voids the episode the same way) so
+    core.py nulls all four rewards and the replay reads as an errored episode
+    rather than a decided one.
+
+    This is deliberately NOT the illegal-move path: a model that returns an
+    unparseable or rule-breaking action forfeits and its opponents are
+    credited, because that is gameplay. A crash is not.
+    """
+    if not any(s.status in _FRAMEWORK_FAILURE_STATUSES for s in state):
+        return False
+    for s in state:
+        if s.status != "TIMEOUT":
+            s.status = "ERROR"
+    return True
+
+
+def process_action(state, config):
+    """Apply the active seat's action. Returns True if the action forfeited
+    the episode, which ends play immediately even when games_per_episode > 1.
+    """
+    current_turn = state[0].observation.current_turn
+    active_agent = state[current_turn]
+    action = active_agent.action
+
+    # core_harness wraps the real action inside {"submission": ...}.
+    # Extract it so the rest of the interpreter sees the unwrapped value.
+    if isinstance(action, dict) and "submission" in action:
+        action = action["submission"]
+
+    # helper to end game
+    def end_game(winner=None):
+        for i in range(4):
+            state[i].status = "DONE"
+            if winner == "blue":
+                if i in [0, 1]:
+                    state[i].reward = (state[i].reward or 0) + 1
+                else:
+                    state[i].reward = state[i].reward or 0
+            elif winner == "yellow":
+                if i in [2, 3]:
+                    state[i].reward = (state[i].reward or 0) + 1
+                else:
+                    state[i].reward = state[i].reward or 0
+            else:
+                state[i].reward = state[i].reward or 0
+
+    def forfeit():
+        """End the episode because the seat at `current_turn` submitted an
+        illegal action. The offending team takes
+        DEFAULT_INVALID_ACTION_REWARD and the opposing team its negation,
+        matching open_spiel_env's non-strict INVALID path. Every seat ends
+        DONE -- including the offender -- so the episode scores normally.
+
+        The offender's team, not just the offender, absorbs the loss: this is
+        a 2v2 game and a forfeit ends it for both teammates, so crediting the
+        partner of the offending seat would reward a team for its own
+        illegal move.
+
+        Rewards are assigned absolutely rather than accumulated, so under
+        games_per_episode > 1 a forfeit discards prior game wins and ends the
+        episode immediately. That mirrors open_spiel, where a forfeit
+        overrides the game's natural returns; the per-game tally is still
+        readable from observation.blue_wins / yellow_wins.
+        """
+        offending_team = [0, 1] if current_turn in [0, 1] else [2, 3]
+        for i in range(4):
+            state[i].status = "DONE"
+            if i in offending_team:
+                state[i].reward = DEFAULT_INVALID_ACTION_REWARD
+            else:
+                state[i].reward = -DEFAULT_INVALID_ACTION_REWARD
+
+    # Handle Invalid Action. Crashes and timeouts never reach here -- the
+    # interpreter routes them to _abort_on_agent_failure first -- so a None
+    # action at this point means the harness produced no usable move.
+    if action is None:
+        forfeit()
+        return True
+
+    # CLUEMASTER TURN
+    if current_turn in [0, 2]:
+        if not isinstance(action, dict) or "clue" not in action or "number" not in action:
+            forfeit()
+            return True
+            
+        # Clue validation
+        normalized_clue = str(action["clue"]).strip().upper()
+        words = state[0].observation.words
+        revealed = state[0].observation.revealed
+        roles = state[0].observation.roles
+        opponent_team = "yellow" if current_turn == 0 else "blue"
+        
+        is_invalid_clue = False
+        if " " in normalized_clue or "-" in normalized_clue:
+            is_invalid_clue = True
+            
+        if not is_invalid_clue:
+            for i in range(BOARD_SIZE):
+                if not revealed[i]:
+                    unrevealed_word = words[i].upper()
+                    if unrevealed_word in normalized_clue or normalized_clue in unrevealed_word:
+                        is_invalid_clue = True
+                        break
+                    
+        if is_invalid_clue:
+            # Penalty: Reveal a random opponent word and pass turn
+            opponent_unrevealed = [i for i in range(BOARD_SIZE) if not revealed[i] and roles[i] == opponent_team]
+            if opponent_unrevealed:
+                to_reveal = random.choice(opponent_unrevealed)
+                for s in state:
+                    s.observation.revealed[to_reveal] = True
+            
+            for s in state:
+                s.observation.clue = ""
+                s.observation.guesses_remaining = 0
+                s.observation.current_turn = 2 if current_turn == 0 else 0
+                
+            # Check if penalty won the game for opponent
+            blue_left = sum(1 for i in range(BOARD_SIZE) if roles[i] == "blue" and not state[0].observation.revealed[i])
+            yellow_left = sum(1 for i in range(BOARD_SIZE) if roles[i] == "yellow" and not state[0].observation.revealed[i])
+            
+            if blue_left == 0:
+                end_game(winner="blue")
+            elif yellow_left == 0:
+                end_game(winner="yellow")
+            else:
+                for i in range(4):
+                    state[i].status = "ACTIVE" if i == state[0].observation.current_turn else "INACTIVE"
+            return
+            
+        # Update state normally
+        for s in state:
+            clue_num = int(action["number"])
+            s.observation.clue = str(action["clue"])
+            s.observation.clue_number = clue_num
+            s.observation.guesses_remaining = BOARD_SIZE if clue_num <= 0 else clue_num + 1
+            s.observation.current_turn = 1 if current_turn == 0 else 3
+            
+        # Set agent statuses
+        for i in range(4):
+            state[i].status = "ACTIVE" if i == state[0].observation.current_turn else "INACTIVE"
+            
+    # GUESSER TURN
+    elif current_turn in [1, 3]:
+        # action is an int (0-24) or -1 (pass) OR a dict with "guess": int
+        guess_val = action.get("guess") if isinstance(action, dict) else action
+        
+        if not isinstance(guess_val, int) or guess_val < -1 or guess_val > BOARD_SIZE - 1:
+            forfeit()
+            return True
+            
+        # Pass
+        if guess_val == -1:
+            clue_num = state[0].observation.clue_number
+            expected_remaining = BOARD_SIZE if clue_num <= 0 else clue_num + 1
+            # 0 ("zero") and -1 ("infinity") clues both give unlimited guesses but STILL require at least 1 guess
+            if state[0].observation.guesses_remaining == expected_remaining:
+                forfeit()
+                return True
+                
+            for s in state:
+                s.observation.clue = ""
+                s.observation.guesses_remaining = 0
+                s.observation.current_turn = 2 if current_turn == 1 else 0
+        else:
+            # Check if already revealed
+            if state[0].observation.revealed[guess_val]:
+                forfeit()
+                return True
+                
+            # Reveal
+            for s in state:
+                s.observation.revealed[guess_val] = True
+            
+            roles = state[0].observation.roles
+            guessed_role = roles[guess_val]
+            team_color = "blue" if current_turn == 1 else "yellow"
+            
+            # Trap check
+            if guessed_role == "trap":
+                end_game(winner="yellow" if team_color == "blue" else "blue")
+                return
+                
+            # Neutral or Opponent word
+            if guessed_role != team_color:
+                for s in state:
+                    s.observation.clue = ""
+                    s.observation.guesses_remaining = 0
+                    s.observation.current_turn = 2 if current_turn == 1 else 0
+            else:
+                # Correct guess
+                for s in state:
+                    s.observation.guesses_remaining -= 1
+                    
+                if state[0].observation.guesses_remaining <= 0:
+                    for s in state:
+                        s.observation.clue = ""
+                        s.observation.guesses_remaining = 0
+                        s.observation.current_turn = 2 if current_turn == 1 else 0
+
+        # Win condition check
+        revealed = state[0].observation.revealed
+        roles = state[0].observation.roles
+        blue_left = sum(1 for i in range(BOARD_SIZE) if roles[i] == "blue" and not revealed[i])
+        yellow_left = sum(1 for i in range(BOARD_SIZE) if roles[i] == "yellow" and not revealed[i])
+        
+        if blue_left == 0:
+            end_game(winner="blue")
+            return
+        elif yellow_left == 0:
+            end_game(winner="yellow")
+            return
+
+        # Next turn setup if not done
+        if state[0].status != "DONE":
+            for i in range(4):
+                state[i].status = "ACTIVE" if i == state[0].observation.current_turn else "INACTIVE"
+
+def interpreter(state, env):
+    # Initialization
+    if len(state[0].observation.get("words", [])) == 0:
+         initialize_game(state, env.configuration)
+         active_player = state[0].observation.current_turn
+         for i in range(4):
+             state[i].status = "ACTIVE" if i == active_player else "INACTIVE"
+         update_visibility(state)
+         return state
+             
+    if env.done:
+        return state
+
+    # A crashed or timed-out seat is a broken participant, not a player making
+    # an illegal move. Void the episode before process_action can launder the
+    # framework's ERROR/TIMEOUT into a scored forfeit.
+    if _abort_on_agent_failure(state):
+        return state
+
+    prev_blue_reward = state[0].reward or 0
+    prev_yellow_reward = state[2].reward or 0
+
+    # Snapshot pre-action context for memory tracking. track_turn needs the
+    # acting agent's index (current_turn is rewritten by process_action) and
+    # the pre-action revealed mask (so it can attribute new reveals to the
+    # right event — a guess vs. an invalid-clue penalty).
+    acting_turn = state[0].observation.current_turn
+    acting_action = state[acting_turn].action
+    pre_revealed = list(state[0].observation.revealed)
+
+    forfeited = process_action(state, env.configuration)
+    update_visibility(state)
+
+    # Custom Memory Logic
+    obs = state[0].observation
+    games_per_episode = env.configuration.get("games_per_episode", 1)
+
+    # Track this step in every agent's observation. Each agent has its own
+    # current_game_turns list; the shared pre_revealed snapshot is safe to
+    # reuse because obs.revealed is symmetric across agents.
+    for s in state:
+        track_turn(s.observation, state, acting_turn, acting_action, pre_revealed)
+    
+    # A forfeit ends the whole episode, so never roll into the next game --
+    # doing so would relaunder the forfeiting seats back to ACTIVE and
+    # overwrite the forfeit rewards.
+    if games_per_episode > 1 and not forfeited:
+        is_done = all(s.status == "DONE" for s in state)
+        if is_done:
+            winner = None
+            if (state[0].reward or 0) > prev_blue_reward: winner = "blue"
+            elif (state[2].reward or 0) > prev_yellow_reward: winner = "yellow"
+            
+            # Update wins in observation
+            if winner == "blue":
+                for s in state:
+                    s.observation.blue_wins += 1
+            elif winner == "yellow":
+                for s in state:
+                    s.observation.yellow_wins += 1
+            
+            window_size = env.configuration.get("memory_window_size", 0)
+            # Per-game memory lives on every agent's observation (track_turn
+            # writes to all four), so save/reset must touch all of them — not
+            # just state[0] — or subsequent prompts will leak prior-game turns.
+            for s in state:
+                save_game_to_history(s.observation, winner, window_size)
+
+            if obs.current_game + 1 < games_per_episode:
+                for s in state:
+                    s.observation.current_game += 1
+                    s.observation.current_game_turns = []
+
+                # Reset board (re-init)
+                initialize_game(state, env.configuration)
+
+                # initialize_game writes full roles to every agent; mask them
+                # again for the guessers before the new game's snapshot is
+                # returned, mirroring the first-game init path.
+                update_visibility(state)
+
+                # Reset agent statuses based on new current_turn
+                for i in range(4):
+                    state[i].status = "ACTIVE" if i == state[0].observation.current_turn else "INACTIVE"
+                    
+    return state
+
+
+def renderer(state, env):
+    words = state[0].observation.words
+    revealed = state[0].observation.revealed
+    roles = state[0].observation.roles
+    
+    out = ""
+    for r in range(5):
+        row_str = ""
+        for c in range(5):
+            idx = r * 5 + c
+            w = words[idx]
+            if revealed[idx]:
+                w = f"[{roles[idx].upper()[0]}] {w}"
+            else:
+                w = f"({roles[idx].upper()[0]}) {w}"
+            row_str += f"{w:<15}"
+        out += row_str + "\n"
+    
+    out += f"\nTurn: {state[0].observation.current_turn}\n"
+    out += f"Clue: {state[0].observation.clue} ({state[0].observation.guesses_remaining} remaining)\n"
+    return out
+
+
+dir_path = path.dirname(__file__)
+json_path = path.abspath(path.join(dir_path, "word_association.json"))
+with open(json_path) as json_file:
+    specification = json.load(json_file)
+
+
+def html_renderer():
+    """Reads the built web visualizer output and serves it for rendering."""
+    jspath = path.join(dir_path, "visualizer", "default", "dist", "index.html")
+    if path.exists(jspath):
+        with open(jspath, encoding="utf-8") as f:
+            return f.read()
+    return ""
+
+from .agents import random_agent
+agents = {"random": random_agent}

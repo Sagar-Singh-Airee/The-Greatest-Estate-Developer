@@ -1,0 +1,138 @@
+# Copyright 2020 Kaggle Inc
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import os
+from importlib import import_module
+from importlib.metadata import PackageNotFoundError, version
+from os import listdir
+
+try:
+    __version__ = version("kaggle-environments")
+except PackageNotFoundError:
+    # Package is not installed. This is a fallback for development mode.
+    __version__ = "dev"
+
+from . import errors, utils
+from .agent import Agent
+from .api import (
+    get_episode_replay,
+    list_episodes,
+    list_episodes_for_submission,
+    list_episodes_for_team,
+)
+from .core import environments, evaluate, make, register, register_lazy
+
+__all__ = [
+    "Agent",
+    "environments",
+    "errors",
+    "evaluate",
+    "make",
+    "register",
+    "utils",
+    "__version__",
+    "get_episode_replay",
+    "list_episodes",
+    "list_episodes_for_team",
+    "list_episodes_for_submission",
+]
+
+_script_dir = os.path.dirname(os.path.realpath(__file__))
+PROJECT_ROOT = os.path.abspath(os.path.join("..", _script_dir))
+
+# Register Environments.
+
+# Dirs that ship only a visualizer subtree with no {name}.py backend.
+# Skipped silently so the CLI stays quiet; any *other* dir missing its
+# backend still surfaces a "Loading environment X failed" message.
+_VISUALIZER_ONLY_ENVS = {"chess", "codenames", "llm_20_questions", "lux_ai_s2"}
+
+# Envs whose module import is deferred until first make(name). Werewolf
+# pulls in ~250ms of pydantic schema construction (game/actions.py,
+# game/records.py, harness/base.py) that would otherwise be paid on every
+# `import kaggle_environments` — the env itself is rarely invoked, so
+# defer it. See core.register_lazy.
+_LAZY_ENVS = {"werewolf"}
+
+
+def _make_lazy_loader(env_name):
+    def _load():
+        env = import_module(f".envs.{env_name}.{env_name}", __name__)
+        register(
+            env_name,
+            {
+                "agents": getattr(env, "agents", []),
+                "html_renderer": getattr(env, "html_renderer", None),
+                "interpreter": getattr(env, "interpreter"),
+                "renderer": getattr(env, "renderer"),
+                "specification": getattr(env, "specification"),
+            },
+        )
+
+    return _load
+
+
+def _make_open_spiel_lazy_loader(env_name, build):
+    def _load():
+        env_dict = build()
+        register(
+            env_name,
+            {
+                "agents": env_dict.get("agents"),
+                "html_renderer": env_dict.get("html_renderer"),
+                "interpreter": env_dict.get("interpreter"),
+                "renderer": env_dict.get("renderer"),
+                "specification": env_dict.get("specification"),
+            },
+        )
+
+    return _load
+
+
+for name in listdir(utils.envs_path):
+    if name in _VISUALIZER_ONLY_ENVS:
+        continue
+    if name in _LAZY_ENVS:
+        register_lazy(name, _make_lazy_loader(name))
+        continue
+    try:
+        env = import_module(f".envs.{name}.{name}", __name__)
+        if name == "open_spiel_env":
+            for env_name, env_dict in env.ENV_REGISTRY.items():
+                register(
+                    env_name,
+                    {
+                        "agents": env_dict.get("agents"),
+                        "html_renderer": env_dict.get("html_renderer"),
+                        "interpreter": env_dict.get("interpreter"),
+                        "renderer": env_dict.get("renderer"),
+                        "specification": env_dict.get("specification"),
+                    },
+                )
+            for env_name, loader in env.LAZY_ENV_LOADERS.items():
+                register_lazy(env_name, _make_open_spiel_lazy_loader(env_name, loader))
+        else:
+            register(
+                name,
+                {
+                    "agents": getattr(env, "agents", []),
+                    "html_renderer": getattr(env, "html_renderer", None),
+                    "interpreter": getattr(env, "interpreter"),
+                    "renderer": getattr(env, "renderer"),
+                    "specification": getattr(env, "specification"),
+                },
+            )
+    except Exception as e:
+        if "football" not in name:
+            print("Loading environment %s failed: %s" % (name, e))

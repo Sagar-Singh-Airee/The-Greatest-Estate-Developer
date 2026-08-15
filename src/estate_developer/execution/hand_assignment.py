@@ -35,6 +35,9 @@ class HandAssignmentSolver:
             "WATER",
             "CARE",
             "COLLECT_FERTILIZER",
+            "FEED",
+            "FERTILIZE",
+            "PLACE",
         }
         tasks = [
             task
